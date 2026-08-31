@@ -1,0 +1,35 @@
+# --- 환경 -----------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.python-version
+uv.lock
+
+# --- 상류 클론 -------------------------------------------------------------
+# bloodraven66/EndpointAnticipation 의 클론. 자체 .git 을 가진 별도 저장소이고
+# 수정하지 않는 것이 원칙이므로 여기서는 추적하지 않는다.
+# 재현에 필요한 커밋 SHA 와 로컬 패치는 patches/ 참고.
+/EndpointAnticipation/
+
+# --- 데이터 (외부에서 받아온다: scripts/download_spokenwoz.py) --------------
+/data/
+/dump/
+/dump_smoke/
+
+# --- 실행 산출물 -----------------------------------------------------------
+/checkpoints/
+/checkpoints_smoke/
+/logs/
+wandb/
+*.pt
+*.ckpt
+*.wav
+*.flac
+
+# --- 잡동사니 --------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

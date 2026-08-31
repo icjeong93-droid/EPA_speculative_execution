@@ -1,0 +1,33 @@
+diff --git a/anticipation-model/src/data/__init__.py b/anticipation-model/src/data/__init__.py
+index aee3285..940c4c2 100755
+--- a/anticipation-model/src/data/__init__.py
++++ b/anticipation-model/src/data/__init__.py
+@@ -11,6 +11,10 @@ from src.data.data_processing import (
+ import multiprocessing
+ from src.utils.logger import logger
+ 
++import os
++
++_NUM_WORKERS = int(os.environ.get("EPA_NUM_WORKERS", "8"))
++
+ def load_data(cfg, feat_extractor):
+     """
+     Load data loaders based on the dataset specified in the config
+@@ -73,7 +77,7 @@ def load_data(cfg, feat_extractor):
+                 batch_size=cfg.run_params.batch_size,
+                 shuffle=True if mode == 'train' else False,
+                 collate_fn=collate_fn, # We train with fixed length segments, so no need for custom collate_fn
+-                num_workers=8,
++                num_workers=_NUM_WORKERS,
+                 pin_memory=True
+             )
+         else:
+@@ -84,7 +88,7 @@ def load_data(cfg, feat_extractor):
+                     batch_size=cfg.run_params.batch_size,
+                     shuffle=False,
+                     collate_fn=collate_fn, # We train with fixed length segments, so no need for custom collate_fn
+-                    num_workers=8,
++                    num_workers=_NUM_WORKERS,
+                     pin_memory=True
+                 )
+                 test_loaders.append((name, test_loader))
