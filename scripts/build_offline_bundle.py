@@ -68,6 +68,15 @@ LINUX_ONLY = [
 ]
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 
+# The upstream clone is NOT tracked by this repo (.gitignore: /EndpointAnticipation/)
+# because it carries its own .git. A fresh checkout on a new machine therefore does
+# not have it, and the bundle build used to discover that only at step [3/4] -- after
+# downloading 4.8 GB -- as a bare OS "path not found".
+UPSTREAM_URL = "https://github.com/bloodraven66/EndpointAnticipation.git"
+UPSTREAM_COMMIT = "531e1d7e70751e980b82088a3a358a2e75fa8a12"
+# marker proving patches/epa-num-workers.patch is applied to the clone
+PATCH_MARKER = ("anticipation-model/src/data/__init__.py", "EPA_NUM_WORKERS")
+
 PYPI = [
     "numpy", "matplotlib", "PyYAML", "huggingface_hub", "tqdm", "moshi",
     "librosa", "scikit-learn", "easydict", "coloredlogs", "soundfile",
@@ -126,6 +135,66 @@ def crlf_offenders(root_dir):
     return out
 
 
+def check_upstream(root, allow_drift=False):
+    """Validate the upstream clone BEFORE anything is downloaded.
+
+    Three ways this used to go wrong silently or late:
+      * missing clone   -> bare "path not found" at [3/4], after 4.8 GB of downloads
+      * wrong commit    -> a bundle that does not reproduce the pinned code
+      * patch not applied -> the shipped repo keeps num_workers=8 hardcoded, so
+        EPA_NUM_WORKERS is ignored on the HPC (preprocess.sbatch relies on =0)
+    """
+    src = root / "EndpointAnticipation"
+    how = (f"  git clone {UPSTREAM_URL} \"{src}\"\n"
+           f"  git -C \"{src}\" checkout {UPSTREAM_COMMIT}\n"
+           f"  git -C \"{src}\" apply \"{root / 'patches' / 'epa-num-workers.patch'}\"")
+
+    if not src.is_dir():
+        raise SystemExit(
+            f"!! upstream clone not found: {src}\n\n"
+            f"   It is deliberately untracked (.gitignore: /EndpointAnticipation/) because it\n"
+            f"   is a separate repository, so a fresh checkout of this repo does not have it.\n"
+            f"   Clone it at the pinned commit and apply our one patch:\n\n{how}")
+
+    if not (src / ".git").exists():
+        raise SystemExit(
+            f"!! {src} exists but is not a git clone.\n"
+            f"   The bundle records the upstream commit for reproducibility.\n"
+            f"   Remove it and redo:\n\n{how}")
+
+    r = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"],
+                       capture_output=True, text=True)
+    head = r.stdout.strip()
+    if r.returncode != 0 or not head:
+        raise SystemExit(f"!! cannot read HEAD of {src}: {r.stderr.strip()}\n\n{how}")
+
+    if head != UPSTREAM_COMMIT:
+        msg = (f"!! upstream is at {head[:12]}, expected {UPSTREAM_COMMIT[:12]}.\n"
+               f"   The bundle would ship code the reproduction was not verified against.\n"
+               f"   Fix:  git -C \"{src}\" checkout {UPSTREAM_COMMIT}\n"
+               f"   (then re-apply patches/epa-num-workers.patch)\n"
+               f"   Override with --allow-upstream-drift if this is deliberate.")
+        if not allow_drift:
+            raise SystemExit(msg)
+        print(msg.replace("!!", "warning:"))
+
+    marker_file, marker = PATCH_MARKER
+    p = src / marker_file
+    if not p.is_file():
+        raise SystemExit(f"!! upstream clone looks wrong -- {p} is missing.\n\n{how}")
+    if marker not in p.read_text(encoding="utf-8", errors="replace"):
+        raise SystemExit(
+            f"!! patches/epa-num-workers.patch is NOT applied to the clone\n"
+            f"   ({marker} not found in {marker_file}).\n"
+            f"   Without it num_workers stays hardcoded at 8 and EPA_NUM_WORKERS is\n"
+            f"   ignored on the HPC -- preprocess.sbatch depends on EPA_NUM_WORKERS=0.\n"
+            f"   Fix:  git -C \"{src}\" apply \"{root / 'patches' / 'epa-num-workers.patch'}\"")
+
+    print(f"upstream: {src}")
+    print(f"          commit {head[:12]} (pinned), epa-num-workers.patch applied")
+    return head
+
+
 def run(cmd, **kw):
     print("  $", " ".join(str(c) for c in cmd), flush=True)
     return subprocess.run(cmd, check=False, **kw)
@@ -169,12 +238,19 @@ def main():
     ap.add_argument("--with-stt", action="store_true", help="also fetch kyutai/stt-1b-en_fr (large)")
     ap.add_argument("--skip-wheels", action="store_true")
     ap.add_argument("--skip-hf", action="store_true")
+    ap.add_argument("--allow-upstream-drift", action="store_true",
+                    help="build even if the upstream clone is not at the pinned commit")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
     out = (root / args.out).resolve() if not Path(args.out).is_absolute() else Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    print(f"bundle -> {out}\n")
+    print(f"bundle -> {out}")
+
+    # Check the cheap precondition first: a missing or wrong upstream clone used to
+    # surface only at [3/4], after gigabytes had already been fetched.
+    commit = check_upstream(root, allow_drift=args.allow_upstream_drift)
+    print()
 
     failed = []
     if not args.skip_wheels:
@@ -237,9 +313,7 @@ def main():
                 failed.append(repo)
 
     print("\n[3/4] repo + our files")
-    src_repo = root / "EndpointAnticipation"
-    commit = subprocess.run(["git", "-C", str(src_repo), "rev-parse", "HEAD"],
-                            capture_output=True, text=True).stdout.strip()
+    src_repo = root / "EndpointAnticipation"   # validated by check_upstream() above
     repo_dst = out / "repo"
     if repo_dst.exists():
         shutil.rmtree(repo_dst)
@@ -250,6 +324,11 @@ def main():
     diff = subprocess.run(["git", "-C", str(src_repo), "diff"], capture_output=True, text=True).stdout
     # newline="\n": written on Windows, applied on Linux. A CRLF patch does not apply.
     (out / "repo_local_changes.patch").write_text(diff, encoding="utf-8", newline="\n")
+    if not diff.strip():
+        # check_upstream already proved the change is present in the files, so this
+        # only means it was committed into the clone rather than left in the worktree.
+        print("  note: repo_local_changes.patch is empty -- the num_workers change is"
+              " committed in the clone, not a working-tree diff. repo/ still carries it.")
 
     epa = out / "epa"
     epa.mkdir(exist_ok=True)

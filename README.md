@@ -38,6 +38,11 @@ pip install huggingface_hub                                    # 데이터 스�
 python scripts/download_spokenwoz.py --root .                  # 12.5GB 압축 → 29GB
 python scripts/download_spokenwoz.py --root . --verify          # 4700/1000 wav 확인
 
+# ★ 상류 클론 — 이 repo에 들어있지 않다. 새 머신이면 반드시 먼저 (아래 설명)
+git clone https://github.com/bloodraven66/EndpointAnticipation.git
+git -C EndpointAnticipation checkout 531e1d7e70751e980b82088a3a358a2e75fa8a12
+git -C EndpointAnticipation apply ../patches/epa-num-workers.patch
+
 python scripts/build_offline_bundle.py --root . --out offline_bundle   # wheel+HF, 4.8GB
 bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming \
     --data-dest /home/sr5/SR_AISolution_ACU/database/EPA     # 번들 + 데이터셋
@@ -49,6 +54,15 @@ bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming \
 
 **`download_spokenwoz.py`는 단독 실행 파일이다.** 이 repo의 나머지에 의존하지 않으므로
 파일 하나만 복사해 가도 된다. 중단되면 그냥 다시 실행하면 이어받는다.
+
+> **`EndpointAnticipation/` 은 이 repo에 포함돼 있지 않다.** 자체 `.git` 을 가진 별도
+> 저장소라 `.gitignore` 로 제외돼 있다 — **이 repo를 새로 clone한 머신에는 그 디렉터리가
+> 없다.** 위 3줄(clone → 고정 커밋 checkout → 패치 적용)을 건너뛰면 번들 빌드가
+> `[3/4] repo + our files` 에서 `지정된 경로를 찾을 수 없습니다` 로 멈춘다.
+> `build_offline_bundle.py` 는 이제 **다운로드를 시작하기 전에** 이 세 가지를 확인한다 —
+> 클론 존재 / 고정 커밋(`531e1d7e`) 일치 / `epa-num-workers.patch` 적용 여부. 하나라도
+> 어긋나면 정확한 복구 명령을 출력하고 멈추므로, 4.8GB를 받은 뒤에 실패하지 않는다.
+> (커밋이 다른 채로 굳이 빌드하려면 `--allow-upstream-drift`.)
 
 > **디스크는 29GB가 아니라 ~42GB가 필요하다.** HF 캐시가 압축 아카이브(tar.gz 10.3GB + zip 2.2GB)를
 > 해제 후에도 들고 있기 때문이다. `--verify` 통과 후 캐시는 지워도 된다.
