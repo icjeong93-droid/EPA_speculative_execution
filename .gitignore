@@ -33,3 +33,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# --- 오프라인 번들 (scripts/build_offline_bundle.py 생성물) ------------------
+# 리눅스 wheel + HF 스냅샷 4.5GB. torch wheel 하나가 860MB라 GitHub 100MB 제한을
+# 넘는다. 인터넷 되는 곳에서 언제든 재생성 가능하므로 추적하지 않는다.
+/offline_bundle/
+*.whl
