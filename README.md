@@ -273,6 +273,11 @@ val epoch: {'val_total': ..., 'val_accuracy': ...}
 Saving model at epoch N to .../best_val_acc.pt
 ```
 
+> **val 곡선이 에폭마다 튀는 것은 정상이다.** validation 창을 매 에폭 무작위로 다시 뽑기
+> 때문이다(상류 동작, 부록 A 참조). 다만 `save_best_from_val_acc`와 early stopping이 그 위에서
+> 도니, **early stopping이 너무 이르게(예: 10에폭 이전) 걸리면 부록 A의 val 시드 고정을 검토할 것.**
+
+
 **파라미터가 25.19M이 아니면 config가 잘못된 것이다.** 중단하고 §5를 다시 확인할 것.
 
 ---
@@ -386,6 +391,45 @@ sbatch scripts/evaluate.sbatch
 
 **배포된 구현 쪽을 따른다.** 재현 대상은 논문 프로즈가 아니라 저자가 실제로 돌린 코드이고,
 공개 체크포인트와 대조하려면 같은 설정이어야 한다. **단 결과 보고 시 이 표를 함께 낼 것**(§10).
+
+### 학습 구성에서 알아둘 것 2건 (상류 동작, 고치지 않음)
+
+논문과 어긋나는 것은 아니지만 **결과 해석에 영향을 준다.** 둘 다 저자 코드 그대로이고
+배포된 h=960 체크포인트도 같은 조건에서 학습됐다.
+
+**1. 1에폭 ≠ 전체 데이터 1회 순회.**
+`__len__`이 대화 개수이고 `__getitem__`은 그 대화에서 **40초 창 하나**만 무작위로 잘라 온다
+(`use_random_start: True`). 305초짜리 대화라면 한 에폭에 13%만 본다. train_dev 기준
+에폭당 약 52시간 / 원본 205시간. 50에폭이면 여러 번 훑지만 **구간 커버리지는 보장되지 않는다.**
+
+**2. validation 샘플이 에폭마다 바뀐다.**
+`use_random_start`는 `src/utils/data_utils.py:119` 한 곳에서만 읽히고 **mode 분기가 없다.**
+train과 val이 같은 경로를 타며 `random.choice`에 시드가 없다(`manual_seed`/`random.seed`/
+`worker_init_fn`/`generator` 전부 부재). DataLoader의 `shuffle: False`는 순서만 고정할 뿐,
+창 위치는 `__getitem__` 안에서 뽑히므로 무관하다. 같은 인덱스를 5번 읽은 실측:
+
+```
+1회차  MUL0011   43.6 -  83.6 초
+2회차  MUL0011  241.9 - 281.9 초
+3회차  MUL0011  171.8 - 211.8 초
+```
+
+**영향:** `save_best_from_val_acc: True`(best 체크포인트 선택)와 `early_stopping_patience: 6`이
+**에폭마다 다른 데이터로 잰 값** 위에서 동작한다. val 대화가 수백 개라 평균이 어느 정도
+상쇄하지만, 에폭 간 비교 가능성은 깨져 있다. 운 좋은 창이 best로 저장되거나 어려운 창이
+연달아 나와 조기 종료될 수 있다.
+
+**판단: 지금은 고치지 않는다.** 재현 기준선(=배포 구현과 동일 조건)을 지키는 값이 더 크다.
+**val 곡선이 심하게 요동치거나 early stopping이 납득 안 되는 시점에 걸리면** 그때 아래 최소
+수정을 검토할 것 — 상류 수정이 1건에서 2건으로 늘고 배포 체크포인트와 조건이 달라진다.
+
+```python
+# src/utils/data_utils.py:119 — val만 대화 ID로 시드 고정 (train은 그대로 무작위)
+rng = random.Random(hash(key)) if mode == "val" else random
+start_time = rng.choice(turn_start_times)
+```
+(`mode`를 `convert_continous_labels_to_fixed_context_frames`까지 넘겨야 한다.)
+
 
 **지표 정의** — MRA: `t_EOT − t_pred` 중앙값(실제 지연 절감) / HEA: 목표 horizon 경계에서의 발사 정밀도 /
 PAR: 조기 발사가 1회 이상인 턴의 비율 / ERC: 턴당 최대 대비 실제 조기 발사 비율.
