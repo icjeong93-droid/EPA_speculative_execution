@@ -69,13 +69,16 @@ echo
 echo "-- bundle (오프라인 설치 재료) --"
 if [ -d "$BUNDLE/wheels" ]; then
   NW=$(ls "$BUNDLE/wheels"/*.whl 2>/dev/null | wc -l)
-  NV=$(ls "$BUNDLE/wheels" 2>/dev/null | grep -ci nvidia)
+  NV=$(ls "$BUNDLE/wheels" 2>/dev/null | grep -i nvidia | grep -c manylinux)
   TR=$(ls "$BUNDLE/wheels" 2>/dev/null | grep -ci '^triton')
   CU=$(ls "$BUNDLE/wheels"/torch-*+cu128*.whl 2>/dev/null | wc -l)
   BAD=$(ls "$BUNDLE/wheels"/torch-*.whl 2>/dev/null | grep -vc cu128)
   [ "$NW" -ge 80 ] && ok "wheel ${NW}개" || no "wheel ${NW}개뿐" "번들 전송이 불완전"
   [ "$NV" -ge 16 ] && ok "nvidia CUDA wheel ${NV}개" \
     || no "nvidia CUDA wheel ${NV}개 (16 필요)" "torch가 CUDA 없이 뜬다. 번들 재빌드 필요 — 사용자에게 알릴 것."
+  NONLINUX=$(ls "$BUNDLE/wheels" 2>/dev/null | grep -cE "win_amd64|win32|macosx")
+  if [ "$NONLINUX" -eq 0 ]; then ok "전부 리눅스 wheel";
+  else no "비-리눅스 wheel ${NONLINUX}개" "빌드 머신(Windows/mac)용 wheel이 섞였다. 이 노드에서는 설치되지 않고 오프라인 복구도 불가 — 사용자에게 번들 재빌드를 요청할 것: ls \$BUNDLE/wheels | grep -E win_amd64\|macosx"; fi
   [ "$TR" -ge 1 ] && ok "triton 있음" || warn "triton 없음" "NO_TORCH_COMPILE=1 로 우회 가능(성능만 손해)"
   [ "$CU" -ge 1 ] && ok "torch cu128 wheel 있음" || no "torch cu128 wheel 없음" "번들 재빌드 필요"
   [ "$BAD" -eq 0 ] && ok "CPU torch 중복 없음" \

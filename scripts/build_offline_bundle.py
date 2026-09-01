@@ -31,7 +31,13 @@ import sys
 from pathlib import Path
 
 # cp312 / linux x86_64. Several tags because not every project publishes the newest.
-PLATFORMS = ["manylinux_2_28_x86_64", "manylinux2014_x86_64", "manylinux_2_17_x86_64"]
+# manylinux_2_27 is NOT optional: the CUDA 12.8 nvidia-* wheels (cublas, cudnn,
+# curand, cusolver) publish ONLY that tag. Without it pip reports the pinned
+# version as nonexistent and the fallback below used to fetch the host wheel --
+# which on a Windows build machine means win_amd64 wheels in a Linux bundle.
+# Keep every tag <= the HPC's glibc (checked: 2.34).
+PLATFORMS = ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64",
+             "manylinux2014_x86_64", "manylinux_2_17_x86_64"]
 PY_VERSION = "3.12"
 ABI = "cp312"
 
@@ -97,7 +103,11 @@ def dl_wheels(py, dest, pkgs, index=None):
     for pkg in pkgs:
         r1 = run(base + ["--only-binary=:all:", pkg])
         if r1.returncode != 0:
-            r2 = run([py, "-m", "pip", "download", "--dest", str(dest), "--no-deps", pkg])
+            # Retry WITHOUT --deps but WITH the platform flags. Dropping them (as an
+            # earlier version did) makes pip fall back to the host platform, which
+            # silently puts win_amd64 wheels in a Linux bundle -- they install fine
+            # here and are unusable on the HPC.
+            r2 = run(base + ["--only-binary=:all:", "--no-deps", pkg])
             if r2.returncode != 0:
                 failed.append(pkg)
     return failed
@@ -134,6 +144,19 @@ def main():
             if "+cu128" not in whl.name:
                 print(f"  removing non-cu128 duplicate: {whl.name}")
                 whl.unlink()
+
+        # Nothing platform-specific may be non-Linux. A win_amd64/macos wheel here
+        # installs cleanly on the build machine and breaks only on the HPC, where
+        # there is no network to fix it.
+        bad = [w.name for w in wd.glob("*.whl")
+               if ("win32" in w.name or "win_amd64" in w.name
+                   or "macosx" in w.name or "-linux_" in w.name)]
+        if bad:
+            print()
+            print("!! non-Linux wheels in the bundle -- these will NOT install on the HPC:")
+            for b in bad:
+                print(f"     {b}")
+            failed.append("non-linux-wheels")
 
     if not args.skip_hf:
         print("\n[2/4] huggingface snapshots")

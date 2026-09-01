@@ -119,8 +119,10 @@ ls bundle/ data/SpokenWOZ/    # 전송된 번들과 데이터셋
 **검증:** python 3.12.x / **glibc ≥ 2.28** / GPU 4장 / scratch ≥200GB /
 `bundle/wheels`·`bundle/hf_cache`·`data/SpokenWOZ` 존재. 하나라도 없으면 **중단하고 사용자에게 알릴 것.**
 
-> ⚠️ **glibc가 2.28 미만이면 (예: CentOS 7 = 2.17) 설치가 실패한다.** 번들의 torch wheel이
-> `manylinux_2_28_x86_64` 태그이기 때문이다. 이 경우 **인터넷 없이는 해결할 수 없다** —
+> ✅ **확인됨 — 이 HPC의 glibc는 2.34다.** 번들에서 가장 높은 태그가 `manylinux_2_28`이고
+> CUDA wheel 4개(cublas/cudnn/curand/cusolver)가 `manylinux_2_27`이므로 전부 호환된다.
+>
+> ⚠️ 다른 노드로 옮길 경우: **glibc가 2.28 미만이면 (예: CentOS 7 = 2.17) 설치가 실패한다.** 이 경우 **인터넷 없이는 해결할 수 없다** —
 > 번들을 `manylinux2014`(glibc 2.17) 태그로 다시 빌드해야 하므로 사용자에게 알릴 것.
 > 확인 명령: `ls bundle/wheels/torch-*.whl` 의 파일명에 찍힌 태그와 `ldd --version` 을 대조.
 
@@ -288,7 +290,7 @@ GATE  EPA-M h=640:  MRA ... HEA ... ERC ...   => PASS
 | # | 증상 | 원인 | 대응 |
 |---|---|---|---|
 | **A** | `torch.__version__`에 `+cu128` 없음 / `cuda False` | **moshi가 `torch<2.10`을 요구해서, moshi를 먼저 설치하면 그 resolver가 cu128 빌드를 CPU 빌드로 교체한다** | `setup_offline.sh`는 torch를 먼저 깐다. 수동 재설치 시에도 **torch → 나머지** 순서를 지킬 것. 번들 wheels에는 cu128만 남겨두었다 |
-| **B** | `ModuleNotFoundError: nvidia_*` / CUDA 초기화 실패 | CUDA 런타임 wheel 누락 | `ls bundle/wheels/ \| grep -c nvidia` 로 16개 확인. 없으면 번들이 불완전 — **인터넷 없이 해결 불가하므로 사용자에게 알릴 것** |
+| **B** | `ModuleNotFoundError: nvidia_*` / CUDA 초기화 실패 | CUDA 런타임 wheel 누락 **또는 win_amd64 wheel 혼입** | `ls bundle/wheels/ \| grep -i nvidia \| grep -c manylinux` 로 16개 확인. 이름만 세면 안 된다 — 빌드 머신이 Windows면 `pip download` 폴백이 win_amd64 wheel을 집어올 수 있고, 그건 여기서 설치되지 않는다. 부족하면 **인터넷 없이 해결 불가하므로 사용자에게 알릴 것** |
 | **C** | `TritonMissing` | moshi의 RoPE가 `torch.compile`을 쓴다 | 리눅스에는 triton이 번들에 있어 정상 동작해야 한다. 그래도 나면 `NO_TORCH_COMPILE=1` (성능만 손해) |
 | **D** | `AttributeError: Can't get local object 'mimi.<locals>.encode'` | DataLoader 워커가 spawn으로 뜨면 Mimi extractor(지역 클래스)를 pickle 못 한다. **리눅스는 fork라 정상적으로는 안 난다** | `EPA_NUM_WORKERS=0` |
 | **E** | `run_name`이 잘려 체크포인트 폴더 이름이 이상함 | `src/utils/common.py`가 `basename(data_yaml).rstrip(".yaml")`을 쓰는데 `rstrip`은 접미사가 아니라 **문자 집합**을 지운다 (`spokenwoz_only.yaml` → `spokenwoz_on`) | 데이터 config 이름을 `. y a m l` 이외 문자로 끝낼 것. 현재 `swoz_v1` |
