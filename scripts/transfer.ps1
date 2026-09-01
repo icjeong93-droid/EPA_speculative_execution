@@ -9,6 +9,11 @@
 #   .\scripts\transfer.ps1 -Dest user@hpc:/scratch/$env:USERNAME/EPA_incoming
 #   .\scripts\transfer.ps1 -Dest user@hpc:/path -DataOnly
 #   .\scripts\transfer.ps1 -Dest user@hpc:/path -BundleOnly
+#   .\scripts\transfer.ps1 -Dest user@hpc:/scratch/$env:USERNAME/EPA_incoming `
+#        -DataDest /home/sr5/SR_AISolution_ACU/database/EPA
+#
+# -DataDest puts SpokenWOZ/ somewhere other than <remote>/data -- use it when the
+# dataset lives in a shared database area rather than next to the working copy.
 #
 # If the HPC needs a jump host or a key, configure it once in ~/.ssh/config and
 # refer to the host by its alias -- this script just calls ssh/scp.
@@ -17,6 +22,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Dest,   # user@host:/remote/path
     [switch]$DataOnly,
     [switch]$BundleOnly,
+    [string]$DataDest = "",                        # remote dir to hold SpokenWOZ/
+                                                   # default: <remote>/data
+
     [int]$BatchSize = 150                          # files per scp call
 )
 
@@ -31,7 +39,10 @@ $Root = Split-Path -Parent $PSScriptRoot
 
 Write-Host "host   : $RemoteHost"
 Write-Host "remote : $RemoteRoot"
-Write-Host "local  : $Root`n"
+$DataRoot = if ($DataDest) { $DataDest.TrimEnd('/') } else { "$RemoteRoot/data" }
+
+Write-Host "local  : $Root"
+Write-Host "data   : $DataRoot/SpokenWOZ`n"
 
 function Invoke-Remote([string]$Cmd) {
     $out = & ssh $RemoteHost $Cmd 2>&1
@@ -116,10 +127,10 @@ if (-not $BundleOnly) {
         throw "data\SpokenWOZ not found. Download it first:`n  python scripts\download_spokenwoz.py --root ."
     }
     Write-Host "== dataset (~29 GB) =="
-    Send-Directory (Join-Path $d "text_5700_train_dev") "$RemoteRoot/data/SpokenWOZ/text_5700_train_dev" "text_train_dev"
-    Send-Directory (Join-Path $d "text_5700_test")      "$RemoteRoot/data/SpokenWOZ/text_5700_test"      "text_test"
-    Send-Directory (Join-Path $d "audio_5700_train_dev") "$RemoteRoot/data/SpokenWOZ/audio_5700_train_dev" "audio_train_dev"
-    Send-Directory (Join-Path $d "audio_5700_test")      "$RemoteRoot/data/SpokenWOZ/audio_5700_test"      "audio_test"
+    Send-Directory (Join-Path $d "text_5700_train_dev") "$DataRoot/SpokenWOZ/text_5700_train_dev" "text_train_dev"
+    Send-Directory (Join-Path $d "text_5700_test")      "$DataRoot/SpokenWOZ/text_5700_test"      "text_test"
+    Send-Directory (Join-Path $d "audio_5700_train_dev") "$DataRoot/SpokenWOZ/audio_5700_train_dev" "audio_train_dev"
+    Send-Directory (Join-Path $d "audio_5700_test")      "$DataRoot/SpokenWOZ/audio_5700_test"      "audio_test"
     Write-Host ""
 }
 
@@ -131,7 +142,7 @@ $checks = @{
 }
 $bad = $false
 foreach ($k in $checks.Keys) {
-    $n = [int](Invoke-Remote "ls -1 '$RemoteRoot/data/SpokenWOZ/$k' 2>/dev/null | wc -l")
+    $n = [int](Invoke-Remote "ls -1 '$DataRoot/SpokenWOZ/$k' 2>/dev/null | wc -l")
     $okk = ($n -eq $checks[$k])
     if (-not $okk) { $bad = $true }
     Write-Host ("  [{0}] {1}: {2} (expected {3})" -f $(if ($okk) { "OK " } else { "BAD" }), $k, $n, $checks[$k])

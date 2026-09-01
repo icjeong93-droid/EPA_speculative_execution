@@ -105,8 +105,16 @@ echo
 
 # ---------------------------------------------------------------- dataset
 echo "-- dataset --"
-D="$WORK/data/SpokenWOZ"
+# The dataset need not live under the workdir (on this cluster it sits in a shared
+# database area). configs/data/swoz_v1.yaml is the authority once make_configs.py
+# has run; SPOKENWOZ=<path> overrides for a check before that.
+D="${SPOKENWOZ:-}"
+if [ -z "$D" ] && [ -f "$WORK/configs/data/swoz_v1.yaml" ]; then
+  D=$(grep -m1 "raw_path:" "$WORK/configs/data/swoz_v1.yaml" | sed "s/.*raw_path:[[:space:]]*//; s/[[:space:]]*$//")
+fi
+[ -n "$D" ] && [ -d "$D" ] || D="$WORK/data/SpokenWOZ"
 [ -d "$D" ] || D="$WORK/../data/SpokenWOZ"
+echo "경로: $D"
 if [ -d "$D" ]; then
   NTR=$(ls "$D/audio_5700_train_dev"/*.wav 2>/dev/null | wc -l)
   NTE=$(ls "$D/audio_5700_test"/*.wav 2>/dev/null | wc -l)
@@ -116,7 +124,7 @@ if [ -d "$D" ]; then
   [ -f "$D/text_5700_train_dev/data.json" ] && ok "data.json 있음" || no "data.json 없음" "rsync 재실행"
   [ -f "$D/text_5700_train_dev/valListFile.json" ] && ok "valListFile.json 있음" || no "valListFile.json 없음" "rsync 재실행"
 else
-  no "data/SpokenWOZ 없음" "★ HPC에서는 다운로드할 수 없다. 인터넷 되는 곳에서 받아 전송해야 한다:
+  no "SpokenWOZ 데이터셋 없음 (찾은 경로: $D)" "★ HPC에서는 다운로드할 수 없다. 인터넷 되는 곳에서 받아 전송해야 한다:
        python scripts/download_spokenwoz.py --root .        (12.5GB 압축 / 29GB 해제)
        bash scripts/transfer.sh user@hpc:/scratch/\$USER/EPA_incoming
      사용자에게 위 두 명령을 로컬에서 실행해달라고 요청할 것."

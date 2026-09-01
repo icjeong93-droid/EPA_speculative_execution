@@ -22,11 +22,12 @@
 ```
 [로컬 - 인터넷 O]                              [HPC - 오프라인]
  download_spokenwoz.py    ──┐
- build_offline_bundle.py  ──┼── transfer.sh ──►  bundle/ + data/SpokenWOZ/
+ build_offline_bundle.py  ──┼── transfer    ──►  bundle/ (작업 FS)
+                            │                    SpokenWOZ/ (공용 database)
                             │    (rsync)          └─ setup_offline.sh 로 설치
 ```
 
-`preflight.sh`가 `data/SpokenWOZ 없음` 또는 `bundle/wheels 없음`을 보고하면, **HPC에서 해결하려 하지 말 것.**
+`preflight.sh`가 `SpokenWOZ 없음` 또는 `bundle/wheels 없음`을 보고하면, **HPC에서 해결하려 하지 말 것.**
 사용자에게 **회사 로컬 머신에서** 아래를 실행해달라고 요청할 것.
 
 ### 회사 로컬에서 (인터넷 필요, 1회)
@@ -38,7 +39,8 @@ python scripts/download_spokenwoz.py --root .                  # 12.5GB 압축 �
 python scripts/download_spokenwoz.py --root . --verify          # 4700/1000 wav 확인
 
 python scripts/build_offline_bundle.py --root . --out offline_bundle   # wheel+HF, 4.8GB
-bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming   # 총 34GB, rsync --partial
+bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming   # 번들만
+# 데이터셋은 공용 database 영역으로 따로 보낸다 (§4)
 ```
 
 **`download_spokenwoz.py`는 단독 실행 파일이다.** 이 repo의 나머지에 의존하지 않으므로
@@ -67,7 +69,8 @@ $env:HF_ENDPOINT = "https://your-hf-mirror"
 (Git Bash도 rsync를 포함하지 않는다). 대신 PowerShell 판을 쓴다.
 
 ```powershell
-.\scripts\transfer.ps1 -Dest user@hpc:/scratch/$env:USERNAME/EPA_incoming
+.\scripts\transfer.ps1 -Dest user@hpc:/scratch/$env:USERNAME/EPA_incoming `
+    -DataDest /home/sr5/SR_AISolution_ACU/database/EPA
 ```
 
 Windows 10+ 내장 OpenSSH의 `scp`/`ssh`만 사용하며, **보내기 전에 원격에 이미 있는 파일 목록을
@@ -113,11 +116,12 @@ python3.12 --version          # 없으면: module avail python → 3.12 계열 l
 ldd --version | head -1       # ★ glibc ≥ 2.28 이어야 함 (아래 참조)
 nvidia-smi                    # H100 4장
 df -h /scratch                # ≥ 200 GB 여유
-ls bundle/ data/SpokenWOZ/    # 전송된 번들과 데이터셋
+ls bundle/                            # 전송된 번들
+ls /home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ/   # 데이터셋
 ```
 
 **검증:** python 3.12.x / **glibc ≥ 2.28** / GPU 4장 / scratch ≥200GB /
-`bundle/wheels`·`bundle/hf_cache`·`data/SpokenWOZ` 존재. 하나라도 없으면 **중단하고 사용자에게 알릴 것.**
+`bundle/wheels`·`bundle/hf_cache`·`/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ` 존재. 하나라도 없으면 **중단하고 사용자에게 알릴 것.**
 
 > ✅ **확인됨 — 이 HPC의 glibc는 2.34다.** 번들에서 가장 높은 태그가 `manylinux_2_28`이고
 > CUDA wheel 4개(cublas/cudnn/curand/cusolver)가 `manylinux_2_27`이므로 전부 호환된다.
@@ -155,9 +159,15 @@ mimi        OK (loaded from HF_HUB_CACHE ...)
 
 ## 4. 데이터 배치
 
+**이 클러스터에서 데이터셋은 작업 디렉터리 밖, 공용 database 영역에 있다.**
+
+```
+/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ/
+```
+
+`transfer.ps1 -DataDest /home/sr5/SR_AISolution_ACU/database/EPA` 로 보냈다면 이미 여기 있다. **옮기지 말 것.**
+
 ```bash
-mkdir -p /scratch/$USER/EPA/data
-mv data/SpokenWOZ /scratch/$USER/EPA/data/
 cd /scratch/$USER/EPA
 source ./env.sh                 # 모든 실행 전에 반드시 source
 ```
@@ -165,9 +175,10 @@ source ./env.sh                 # 모든 실행 전에 반드시 source
 **검증**
 
 ```bash
-ls data/SpokenWOZ/audio_5700_train_dev/*.wav | wc -l   # 4700
-ls data/SpokenWOZ/audio_5700_test/*.wav | wc -l        # 1000
-ls data/SpokenWOZ/text_5700_train_dev/                 # data.json, valListFile.json
+D=/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ
+ls $D/audio_5700_train_dev/*.wav | wc -l   # 4700
+ls $D/audio_5700_test/*.wav | wc -l        # 1000
+ls $D/text_5700_train_dev/                 # data.json, valListFile.json
 ```
 
 숫자가 다르면 전송이 불완전한 것이다. rsync를 다시 돌릴 것 (`--partial`이라 이어받는다).
@@ -177,12 +188,13 @@ ls data/SpokenWOZ/text_5700_train_dev/                 # data.json, valListFile.
 ## 5. Config 생성
 
 ```bash
-$VENV/bin/python scripts/make_configs.py --root /scratch/$USER/EPA --num-workers 32
+$VENV/bin/python scripts/make_configs.py --root /scratch/$USER/EPA --num-workers 32 \
+    --spokenwoz /home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ
 ```
 
 **검증:** `configs/forecasting/mimi/` 에 fc320·fc640·fc960·fc1280·fc1600·fc1920·fc2240·fc2560·fcall 존재,
 `configs/infer.yaml` 존재(평가용, §7.5),
-`configs/data/swoz_v1.yaml` 의 `raw_path` 가 실제 데이터 경로를 가리킬 것.
+`configs/data/swoz_v1.yaml` 의 `raw_path` 가 `/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ` 를 가리킬 것 — `preflight.sh`가 이 값을 읽어 데이터를 찾는다.
 
 > `fc640`은 상류 리포에 없어서 이 스크립트가 fc960을 복제해 만든다. Table 1의 주력 horizon이므로 반드시 있어야 한다.
 > 데이터 config 이름이 숫자로 끝나는 것은 의도적이다 — §8-E 참조.
@@ -395,16 +407,18 @@ SpokenWOZ가 필요한 것을 전부 갖고 있다 — `words[i]`에 `{Word, Beg
 ## 부록 D — 디렉터리
 
 ```
-EPA/
+EPA/                        작업 디렉터리 (데이터셋은 여기 없음 — §4)
 ├── EndpointAnticipation/   상류 클론 (수정 금지, patch 1건만 적용됨)
 ├── configs/                make_configs.py 생성물
-├── data/SpokenWOZ/         원본 (28 GB)
-├── dump/                   전처리 산출물 (~130 GB)
+├── dump/                   전처리 산출물 (~110 GB) — 작업 FS 용량 확인할 것
 ├── checkpoints/            학습 출력
 ├── logs/
 ├── scripts/
 ├── env.sh                  ★ 모든 실행 전 source
 └── requirements-freeze.txt
+
+/home/sr5/SR_AISolution_ACU/database/EPA/
+└── SpokenWOZ/             원본 28 GB (공용, 작업 디렉터리 밖)
 ```
 
 | 스크립트 | 용도 |
