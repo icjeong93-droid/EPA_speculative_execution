@@ -35,6 +35,70 @@ DATA_CONFIGS = {
 }
 
 
+def build_infer_config(datasets, spokenwoz, switchboard, ckpt):
+    """
+    The evaluation config. Table 1's four metrics (MRA/HEA/PAR/ERC) are computed
+    only in ForecastingTrainer.infer_loop, which runs only when cfg.infer_params
+    exists -- training itself reports nothing but val accuracy. So without this
+    file the HPC run produces checkpoints and no paper numbers.
+
+    src/utils/common.py:load_run resolves the checkpoint as
+        join(infer_params.root_path, infer_params.checkpoint_folder, wandb.run_name)
+    and run.py's --infer flag supplies run_name, so root_path/checkpoint_folder
+    are split from the checkpoint dir here.
+
+    data.datasets here OVERRIDES the training data config (load_run keeps
+    infer_datasets), so the raw paths must be right in this file too.
+    """
+    blocks = []
+    if "spokenwoz" in datasets:
+        blocks.append(f"""    spokenwoz:
+        raw_path: {spokenwoz}
+        sr: 8000
+        channels:
+          separate: true
+          preserve: all
+          save_path: "{{dump_path}}/spokenwoz_separate_channels/{{fname}}"
+""")
+    if "switchboard" in datasets:
+        blocks.append(f"""    switchboard:
+        raw_path: {switchboard}
+        sr: 8000
+        channels:
+          separate: true
+          preserve: all
+          save_path: "{{dump_path}}/switchboard_separate_channels/{{fname}}"
+        filter_out_keyword: FISHER
+        filter_keyword: sw
+        min_words_per_turn: 4
+""")
+    ckpt = Path(ckpt)
+    return f"""data:
+  modes: [test] #keep this fixed -- evaluation runs on the held-out test split
+
+  datasets:
+{"".join(blocks)}
+infer_params:
+  device: cuda
+  batch_size: 1          # full-dialogue inference; the loader is not padded
+  root_path: {ckpt.parent.as_posix()}
+  checkpoint_folder: {ckpt.name}
+  infer_single_sample: false
+  score_turns: [user]
+  threshold_range: [0.05, 0.7, 40]   # swept; report_table1.py picks the operating point
+  infer_accuracy_collar_frames: 1
+  reset_resample: False
+  num_infer_pred_imgs: 1             # per-run trace figure; 0 disables
+  infer_checkpoint_name: best_val_acc.pt
+  min_turn_length: 1
+
+wandb:
+  run_name: PLACEHOLDER   # overridden per run by: run.py --infer <run_name>
+  wandb_project:
+  use_wandb: False
+"""
+
+
 def build_data_config(datasets, spokenwoz, switchboard, dump):
     blocks = []
     if "spokenwoz" in datasets:
@@ -107,7 +171,7 @@ def main():
     switchboard = args.switchboard or "/PATH/TO/SWITCHBOARD_KALDI_DATA  # LDC required"
     dump = args.dump or (root / "dump")
     ckpt = args.checkpoints or (root / "checkpoints")
-    out = Path(args.out) if args.out else (root / "configs")
+    out = (Path(args.out).resolve() if args.out else (root / "configs"))
     upstream = root / UPSTREAM
 
     (out / "data").mkdir(parents=True, exist_ok=True)
@@ -144,11 +208,17 @@ def main():
     (out / "forecasting" / "mimi" / name640).write_text(base, encoding="utf-8")
     made.append(name640 + "   <- CREATED (missing upstream)")
 
+    # ---- infer config: upstream ships one with the authors' paths baked in ----
+    infer_text = build_infer_config(DATA_CONFIGS[args.data_config], spokenwoz, switchboard, ckpt)
+    (out / "infer.yaml").write_text(infer_text, encoding="utf-8")
+    print("  infer.yaml   <- evaluation (MRA/HEA/PAR/ERC)")
+
     for m in sorted(made):
         print(f"  forecasting/mimi/{m}")
     print(f"\nconfigs written to {out}")
     print(f"model configs point at: {target_data_cfg}")
     print(f"checkpoints -> {Path(ckpt).as_posix()}")
+    print(f"evaluate with : $VENV/bin/python run.py --config {(out / 'infer.yaml').as_posix()} --infer <run_name>")
 
 
 if __name__ == "__main__":

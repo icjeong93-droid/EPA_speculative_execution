@@ -1,0 +1,30 @@
+data:
+  modes: [test] #keep this fixed -- evaluation runs on the held-out test split
+
+  datasets:
+    spokenwoz:
+        raw_path: C:/Users/user/Desktop/0.WORK/Samsung/EPA/data/SpokenWOZ_smoke
+        sr: 8000
+        channels:
+          separate: true
+          preserve: all
+          save_path: "{dump_path}/spokenwoz_separate_channels/{fname}"
+
+infer_params:
+  device: cuda
+  batch_size: 1          # full-dialogue inference; the loader is not padded
+  root_path: C:/Users/user/Desktop/0.WORK/Samsung/EPA
+  checkpoint_folder: checkpoints_smoke
+  infer_single_sample: false
+  score_turns: [user]
+  threshold_range: [0.05, 0.7, 40]   # swept; report_table1.py picks the operating point
+  infer_accuracy_collar_frames: 1
+  reset_resample: False
+  num_infer_pred_imgs: 1             # per-run trace figure; 0 disables
+  infer_checkpoint_name: best_val_acc.pt
+  min_turn_length: 1
+
+wandb:
+  run_name: PLACEHOLDER   # overridden per run by: run.py --infer <run_name>
+  wandb_project:
+  use_wandb: False

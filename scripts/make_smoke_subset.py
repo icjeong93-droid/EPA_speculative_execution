@@ -25,6 +25,8 @@ def main():
     ap.add_argument("--root", required=True)
     ap.add_argument("--train", type=int, default=32, help="train dialogues to keep")
     ap.add_argument("--val", type=int, default=8, help="val dialogues to keep")
+    ap.add_argument("--test", type=int, default=0,
+                    help="test dialogues to keep -- needed to exercise the evaluation path")
     ap.add_argument("--name", default="SpokenWOZ_smoke")
     args = ap.parse_args()
 
@@ -66,10 +68,36 @@ def main():
             shutil.copy2(s, d)
         total += d.stat().st_size
 
-    # the loader also opens the test split; give it a valid but tiny one
+    # the loader always opens the test split. With --test 0 it gets a valid but
+    # empty one; with --test N it gets a real subset so the evaluation path
+    # (run.py --config configs/infer.yaml --infer ...) can be exercised too.
     (dst / "text_5700_test").mkdir(exist_ok=True)
-    (dst / "text_5700_test" / "data.json").write_text("{}", encoding="utf-8")
     (dst / "audio_5700_test").mkdir(exist_ok=True)
+    test_data = {}
+    if args.test:
+        src_test = json.loads((src / "text_5700_test" / "data.json").read_text(encoding="utf-8"))
+        # handle_length_filtering drops dialogues shorter than context+offset (50 s),
+        # so picking the longest keeps the subset from filtering down to nothing.
+        def dur(k):
+            log = src_test[k]["log"]
+            return log[-1]["words"][-1]["EndTime"] / 1000.0 - log[0]["words"][0]["BeginTime"] / 1000.0
+        # keep it cheap but valid: handle_length_filtering drops anything shorter
+        # than context+offset (50 s), so take the SHORTEST dialogues above 60 s.
+        cand = sorted([k for k in sorted(src_test) if dur(k) >= 60.0], key=dur)
+        picked = cand[: args.test]
+        test_data = {k: src_test[k] for k in picked}
+        for k in picked:
+            sp = src / "audio_5700_test" / f"{k}.wav"
+            if not sp.is_file():
+                print(f"  !! missing test audio for {k}")
+                continue
+            dp = dst / "audio_5700_test" / sp.name
+            if not dp.exists():
+                shutil.copy2(sp, dp)
+        print(f"test: {len(test_data)} dialogues "
+              f"({min(dur(k) for k in picked):.0f}-{max(dur(k) for k in picked):.0f} s)")
+    (dst / "text_5700_test" / "data.json").write_text(
+        json.dumps(test_data, ensure_ascii=False), encoding="utf-8")
 
     print(f"audio copied: {total/1e6:.0f} MB -> {audio_dst}")
     print(f"\nsubset at {dst.as_posix()}")

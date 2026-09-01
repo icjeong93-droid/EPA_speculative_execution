@@ -170,6 +170,10 @@ echo "-- 진행 상태 --"
          && ok "config ${N}개 (fc640 포함)" || no "fc640 config 없음" "make_configs.py 재실행 (README §5)"; } \
   || skip "config 미생성 (README §5)"
 
+if [ -f "$WORK/configs/infer.yaml" ]; then ok "infer.yaml 있음 (평가용)";
+elif [ -d "$WORK/configs/forecasting/mimi" ]; then no "configs/infer.yaml 없음" "평가(MRA/HEA/PAR/ERC)를 돌릴 수 없다. make_configs.py 재실행 (README §5)";
+else skip "infer.yaml 미생성 (README §5)"; fi
+
 [ -d "$WORK/dump/spokenwoz" ] \
   && { NJ=$(ls "$WORK/dump/spokenwoz"/*.json 2>/dev/null | wc -l)
        [ "$NJ" -ge 8 ] && ok "전처리 완료 (json ${NJ}개, $(du -sh "$WORK/dump" 2>/dev/null | cut -f1))" \
@@ -179,6 +183,13 @@ echo "-- 진행 상태 --"
 [ -d "$WORK/checkpoints" ] && [ -n "$(find "$WORK/checkpoints" -name '*.pt' 2>/dev/null)" ] \
   && ok "체크포인트 있음: $(find "$WORK/checkpoints" -name 'best_val_acc.pt' | wc -l)개" \
   || skip "학습 전 (README §7)"
+
+if ls "$WORK"/dump/*/filtered_test_*.json >/dev/null 2>&1; then ok "test 분할 전처리 완료 (평가 준비됨)";
+else skip "test 분할 미전처리 — 평가 전에: sbatch scripts/preprocess.sbatch test (README §7.5)"; fi
+
+NEVAL=$(ls "$WORK"/checkpoints/*/infer_results.pt 2>/dev/null | wc -l)
+if [ "$NEVAL" -gt 0 ]; then ok "평가 결과 ${NEVAL}개 — 표: scripts/report_table1.py --root $WORK";
+else skip "평가 전 (README §7.5)"; fi
 echo
 
 # ---------------------------------------------------------------- verdict

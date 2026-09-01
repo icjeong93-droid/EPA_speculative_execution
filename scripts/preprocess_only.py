@@ -23,7 +23,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="any model config; only its data_config matters")
     ap.add_argument("--model-dir", default=None, help="path to anticipation-model (default: sibling of this repo)")
+    ap.add_argument("--modes", nargs="+", default=None, choices=["train", "val", "test"],
+                    help="override cfg.data.modes. The data config fixes [train, val]; pass "
+                         "'test' to prepare the evaluation split ahead of time, so inference "
+                         "does not start by resampling 1000 dialogues on a GPU node.")
     args = ap.parse_args()
+
+    # resolve BEFORE chdir: a relative --config (what preprocess.sbatch passes from
+    # the submit dir) would otherwise be looked up under the model dir and fail.
+    config = Path(args.config).resolve()
+    if not config.is_file():
+        raise SystemExit(f"config not found: {config}")
 
     model_dir = Path(args.model_dir) if args.model_dir else \
         Path(__file__).resolve().parent.parent / "EndpointAnticipation" / "anticipation-model"
@@ -35,11 +45,14 @@ def main():
     from src.utils.common import load_config, load_run
     from src.data import load_data
 
-    cfg = load_config([str(Path(args.config).resolve())])
+    cfg = load_config([str(config)])
     cfg.run_params.device = "cpu"
+    if args.modes:
+        cfg.data.modes = list(args.modes)
     print(f"run_name : {cfg.run_name}")
     print(f"dump     : {cfg.data.save_paths.dump}")
     print(f"datasets : {list(cfg.data.datasets.keys())}")
+    print(f"modes    : {list(cfg.data.modes)}")
     print("device   : cpu (preprocessing only)\n")
 
     _model, cfg, _trainer, feat_extractor = load_run(cfg)

@@ -179,6 +179,7 @@ $VENV/bin/python scripts/make_configs.py --root /scratch/$USER/EPA --num-workers
 ```
 
 **검증:** `configs/forecasting/mimi/` 에 fc320·fc640·fc960·fc1280·fc1600·fc1920·fc2240·fc2560·fcall 존재,
+`configs/infer.yaml` 존재(평가용, §7.5),
 `configs/data/swoz_v1.yaml` 의 `raw_path` 가 실제 데이터 경로를 가리킬 것.
 
 > `fc640`은 상류 리포에 없어서 이 스크립트가 fc960을 복제해 만든다. Table 1의 주력 horizon이므로 반드시 있어야 한다.
@@ -189,7 +190,8 @@ $VENV/bin/python scripts/make_configs.py --root /scratch/$USER/EPA --num-workers
 ## 6. 전처리 (CPU 잡, 반드시 먼저)
 
 ```bash
-sbatch scripts/preprocess.sbatch     # CPU 전용. GPU를 요청하지 않는다
+sbatch scripts/preprocess.sbatch          # train + val — 학습에 필요
+sbatch scripts/preprocess.sbatch test     # test 분할 — 평가(§7.5)에 필요, 지금 같이 걸어두면 좋다
 ```
 
 **이 단계를 건너뛰고 학습을 걸지 말 것.** 전처리는 CPU 바운드로 1~2시간 걸리는데 `run.py` 안에서 실행되므로,
@@ -243,6 +245,44 @@ Saving model at epoch N to .../best_val_acc.pt
 
 ---
 
+## 7.5. 평가 — Table 1 뽑기
+
+**학습은 val accuracy만 남긴다.** MRA/HEA/PAR/ERC는 `ForecastingTrainer.infer_loop`에서만 계산되고,
+그건 config에 `infer_params`가 있을 때만 — 즉 `configs/infer.yaml`(§5에서 생성됨)로만 돈다.
+이 단계를 하지 않으면 체크포인트만 남고 논문과 대조할 숫자는 하나도 나오지 않는다.
+
+```bash
+sbatch scripts/preprocess.sbatch test    # 아직 안 했다면 먼저 (CPU 잡)
+sbatch scripts/evaluate.sbatch           # 학습된 런 전부 → 추론 → 표 출력
+# 특정 런만: bash scripts/evaluate.sh fc640 fcall
+```
+
+**출력**
+
+```
+variant  h(ms)   thr  MRA(ms)  HEA(%)  PAR(%)  ERC(%)   @ERC   paper (MRA/HEA/PAR/ERC)
+EPA-M      640  0.35      640    66.1    66.8    33.9   33.8   640 / 67.0 / 66.2 / 33.8
+EPA-M     1280  0.30     1150    50.9    53.1    33.4   33.2   1120 / 49.7 / 52.8 / 33.2
+
+GATE  EPA-M h=640:  MRA ... HEA ... ERC ...   => PASS
+```
+
+**읽는 법**
+
+- 논문 Table 1은 곡선이 아니라 **특정 ERC 동작점에서 읽은 한 줄**이다. 스크립트가 threshold 40개
+  스윕에서 그 행의 논문 ERC(33.8/33.9/33.7/33.2)에 가장 가까운 threshold를 고르고, 거기서 나머지
+  세 지표를 읽는다. `@ERC` 열이 맞춘 목표값이다.
+- 전체 곡선은 `logs/eval/threshold_sweep.csv`에 남는다. 다른 동작점에서 보려면
+  `--target-erc 20` 또는 `--threshold 0.35`.
+- **모든 값이 0이면 성능이 좋은 게 아니라 한 번도 발사하지 않은 것이다.** 스크립트가 경고를 띄운다.
+  이때는 threshold 스윕 하한(0.05)보다 모델 출력이 낮은 것이므로, 학습이 덜 됐는지부터 확인할 것.
+- `fcall` 런이 EPA-M이다. 관문(§1) 판정은 이 런에서만 나온다.
+
+**test 분할 전처리를 건너뛰면 `evaluate.sh`가 실행을 거부한다** — 그대로 두면 H100을 잡은 채
+1000개 대화를 리샘플링하기 때문이다.
+
+---
+
 ## 8. 실패 모드 표
 
 | # | 증상 | 원인 | 대응 |
@@ -271,11 +311,15 @@ Saving model at epoch N to .../best_val_acc.pt
 
 ## 10. 결과 보고
 
-학습이 끝나면 다음을 보고할 것.
+학습이 끝나면 **§7.5를 실행해 표를 만든 뒤** 다음을 보고할 것.
 
-1. 각 런의 **MRA / HEA / PAR / ERC** (SpokenWOZ, horizon별)
+```bash
+sbatch scripts/evaluate.sbatch
+```
+
+1. 각 런의 **MRA / HEA / PAR / ERC** (SpokenWOZ, horizon별) — `report_table1.py` 출력 그대로
 2. §1 관문(EPA-M h=640, HEA 67.0% ± 3%p) 통과 여부
-3. **반드시 함께:** "SpokenWOZ 단독 학습이며 논문은 SpokenWOZ + Switchboard 조건"
+3. **반드시 함께:** "SpokenWOZ 단독 학습이며 논문은 SpokenWOZ + Switchboard 조건" + 부록 A의 논문↔코드 불일치 4건
 4. 전처리 후 필터링된 턴 수 (논문과 대조할 첫 숫자)
 5. `fc960`을 돌렸다면 공개 체크포인트(h=960)와의 대조 결과
 
@@ -295,6 +339,21 @@ Saving model at epoch N to .../best_val_acc.pt
 | 확정 시 | 이진 채택/폐기가 아니라 **전체 전사 + 기생성 토큰으로 이어서 생성** |
 | 라벨 | Silero VAD로 후행 무음 제거, 2초 미만 턴 마스킹 |
 
+### 논문 본문과 저자 코드가 어긋나는 곳 4건
+
+상류 config와 **저자가 배포한 h=960 체크포인트의 `config.yaml`이 완전히 동일**하다.
+즉 아래는 우리가 논문에서 벗어난 것이 아니라, 저자의 실제 실행이 논문 본문과 다른 것이다.
+
+| 항목 | 논문 본문 | 상류 config = 배포 ckpt = 우리 |
+|---|---|---|
+| batch size | "batch size of 16" | **8** |
+| 좌측 컨텍스트 | "fixed 250-frame left context" | **240** (19.2초) |
+| 클래스 가중 | "10:1 weighted loss" | **0.5 : 0.1 = 5:1** (파일명은 `loss1-01`인데 값이 다름) |
+| 최소 단어수 | "min. of 3 words for Switchboard" | **4** (Switchboard 전용 — 우리는 미사용) |
+
+**배포된 구현 쪽을 따른다.** 재현 대상은 논문 프로즈가 아니라 저자가 실제로 돌린 코드이고,
+공개 체크포인트와 대조하려면 같은 설정이어야 한다. **단 결과 보고 시 이 표를 함께 낼 것**(§10).
+
 **지표 정의** — MRA: `t_EOT − t_pred` 중앙값(실제 지연 절감) / HEA: 목표 horizon 경계에서의 발사 정밀도 /
 PAR: 조기 발사가 1회 이상인 턴의 비율 / ERC: 턴당 최대 대비 실제 조기 발사 비율.
 
@@ -311,6 +370,8 @@ PAR: 조기 발사가 1회 이상인 턴의 비율 / ERC: 턴당 최대 대비 �
 | 전처리 4단계 | 정상 (스모크 40대화) |
 | 학습 루프 | end-to-end 통과 — 스텝·검증·체크포인트·early stopping |
 | 파라미터 수 | **25.19M** (논문 "25M"과 일치) |
+| 평가 경로 | **end-to-end 통과** — 추론 → `infer_results.pt` → `report_table1.py` 표 출력 (스모크 3대화) |
+| threshold 선택 로직 | 합성 스윕으로 검증 — 목표 ERC 매칭 / `--target-erc` / `--threshold` 3경로 |
 
 `scripts/make_smoke_subset.py`로 40대화 부분집합을 만들면 전체 파이프라인을 수 분 안에 재확인할 수 있다.
 GPU 4장을 큐에 걸기 전 점검용으로 쓸 것.
@@ -348,10 +409,12 @@ EPA/
 |---|---|
 | **`preflight.sh`** | **★ 전제·번들·데이터·설치·진행 상태를 한 번에 점검하고 실패마다 대응 명령 출력. 항상 먼저 실행** |
 | `setup_offline.sh` | 오프라인 설치 (번들 안에 있음) |
-| `make_configs.py` | 경로 교정 config 생성 + 누락된 fc640 생성 |
-| `preprocess_only.py` / `preprocess.sbatch` | 전처리만 (CPU 잡) |
+| `make_configs.py` | 경로 교정 config 생성 + 누락된 fc640 + `infer.yaml` 생성 |
+| `preprocess_only.py` / `preprocess.sbatch` | 전처리만 (CPU 잡). `test` 인자로 평가용 분할 |
+| `evaluate.sh` / `evaluate.sbatch` | **학습 후 추론 → MRA/HEA/PAR/ERC** |
+| `report_table1.py` | threshold 스윕을 논문 Table 1 한 줄로 환원 + 관문 판정 |
 | `launch_train.sh` / `train.sbatch` | GPU에 런 분배 |
-| `make_smoke_subset.py` | 40대화 축소본 (파이프라인 점검용) |
+| `make_smoke_subset.py` | 40대화 축소본 (`--test N`으로 평가 경로까지 점검) |
 | `sitecustomize.py` | torchaudio I/O 폴백 (§8-F) |
 | `build_offline_bundle.py` | **인터넷 되는 곳에서만** — 리눅스 wheel + HF 스냅샷 수집 |
 | `transfer.sh` / `transfer.ps1` | 번들+데이터 전송. **Windows는 `.ps1`** (rsync가 없으므로 scp 기반, 재개 가능) |
