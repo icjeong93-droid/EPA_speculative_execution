@@ -44,11 +44,35 @@ bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming   # 총 34GB, rsyn
 **`download_spokenwoz.py`는 단독 실행 파일이다.** 이 repo의 나머지에 의존하지 않으므로
 파일 하나만 복사해 가도 된다. 중단되면 그냥 다시 실행하면 이어받는다.
 
+> **디스크는 29GB가 아니라 ~42GB가 필요하다.** HF 캐시가 압축 아카이브(tar.gz 10.3GB + zip 2.2GB)를
+> 해제 후에도 들고 있기 때문이다. `--verify` 통과 후 캐시는 지워도 된다.
+
 사내망 프록시나 미러가 있다면:
 ```bash
 export HTTPS_PROXY=http://proxy.corp:8080
 export HF_ENDPOINT=https://your-hf-mirror
 ```
+
+### 로컬이 Windows인 경우
+
+다운로드 명령은 cmd/PowerShell에서 **그대로 동작한다**. 다만 두 가지가 다르다.
+
+**환경변수** — bash의 `export` 대신:
+```powershell
+$env:HTTPS_PROXY = "http://proxy.corp:8080"
+$env:HF_ENDPOINT = "https://your-hf-mirror"
+```
+
+**전송** — `transfer.sh`는 **rsync를 쓰므로 Windows에서 실행할 수 없다**
+(Git Bash도 rsync를 포함하지 않는다). 대신 PowerShell 판을 쓴다.
+
+```powershell
+.\scripts\transfer.ps1 -Dest user@hpc:/scratch/$env:USERNAME/EPA_incoming
+```
+
+Windows 10+ 내장 OpenSSH의 `scp`/`ssh`만 사용하며, **보내기 전에 원격에 이미 있는 파일 목록을
+받아 없는 것만 전송**하므로 중간에 끊겨도 다시 실행하면 이어진다. 끝나면 원격 파일 수(4700/1000)를
+직접 세어 검증한다. `-DataOnly` / `-BundleOnly` 로 나눠 보낼 수도 있다.
 
 `build_offline_bundle.py`는 리눅스용 wheel을 받는다 — **로컬이 Windows여도 무방하다**(`--platform` 지정).
 다만 `pip`가 있는 python으로 실행해야 하고, `huggingface_hub`도 필요하다.
@@ -329,4 +353,5 @@ EPA/
 | `launch_train.sh` / `train.sbatch` | GPU에 런 분배 |
 | `make_smoke_subset.py` | 40대화 축소본 (파이프라인 점검용) |
 | `sitecustomize.py` | torchaudio I/O 폴백 (§8-F) |
-| `build_offline_bundle.py` / `transfer.sh` | **인터넷 되는 곳에서만** 사용 |
+| `build_offline_bundle.py` | **인터넷 되는 곳에서만** — 리눅스 wheel + HF 스냅샷 수집 |
+| `transfer.sh` / `transfer.ps1` | 번들+데이터 전송. **Windows는 `.ps1`** (rsync가 없으므로 scp 기반, 재개 가능) |
