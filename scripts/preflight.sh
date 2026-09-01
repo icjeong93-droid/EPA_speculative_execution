@@ -200,11 +200,26 @@ if [ -f "$WORK/configs/infer.yaml" ]; then ok "infer.yaml 있음 (평가용)";
 elif [ -d "$WORK/configs/forecasting/mimi" ]; then no "configs/infer.yaml 없음" "평가(MRA/HEA/PAR/ERC)를 돌릴 수 없다. make_configs.py 재실행 (README §5)";
 else skip "infer.yaml 미생성 (README §5)"; fi
 
-[ -d "$DUMP/spokenwoz" ] \
-  && { NJ=$(ls "$DUMP/spokenwoz"/*.json 2>/dev/null | wc -l)
-       [ "$NJ" -ge 8 ] && ok "전처리 완료 (json ${NJ}개, $(du -sh "$DUMP" 2>/dev/null | cut -f1))" \
-         || warn "전처리 부분적 (json ${NJ}개)" "preprocess.sbatch 재실행"; } \
-  || skip "전처리 전 (README §6)"
+SW="$DUMP/spokenwoz"
+PREP_MISSING=""
+for f in preprocessed_train preprocessed_val vad_processed_train vad_processed_val processed_train processed_val; do
+  [ -f "$SW/$f.json" ] || PREP_MISSING="$PREP_MISSING $f.json"
+done
+for m in train val; do
+  ls "$SW"/filtered_${m}_context_*.json >/dev/null 2>&1 || PREP_MISSING="$PREP_MISSING filtered_${m}"
+done
+
+if [ ! -d "$SW" ]; then
+  skip "전처리 전 (README §6)"
+elif [ -z "$PREP_MISSING" ]; then
+  ok "전처리 완료 train/val ($(du -sh "$DUMP" 2>/dev/null | cut -f1))"
+elif [ -f "$SW/processed_train.json" ] && [ ! -f "$SW/processed_val.json" ]; then
+  no "전처리가 train과 val 사이에서 끊겼다" "★ 그냥 재실행하면 안 된다. 상류 handle_and_add_turns가 processed_train.json을 보면 val을 만들지 않고 return한다 (src/data/data_processing.py:29). 지우고 다시 돌릴 것:
+     rm $SW/processed_*.json
+     sbatch scripts/preprocess.sbatch"
+else
+  warn "전처리 미완 (누락:$PREP_MISSING)" "sbatch scripts/preprocess.sbatch 재실행 (완료된 단계는 건너뛴다)"
+fi
 
 [ -d "$WORK/checkpoints" ] && [ -n "$(find "$WORK/checkpoints" -name '*.pt' 2>/dev/null)" ] \
   && ok "체크포인트 있음: $(find "$WORK/checkpoints" -name 'best_val_acc.pt' | wc -l)개" \

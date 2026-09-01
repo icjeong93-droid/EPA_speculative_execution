@@ -225,6 +225,19 @@ du -sh $D                    # ~110 GB
 
 로그 끝에 `preprocessing complete.` 와 샘플 수가 찍힌다.
 
+**중간에 끊겼다면** — `preflight.sh`가 어느 단계에서 멈췄는지 짚어준다.
+
+```bash
+bash scripts/preflight.sh /scratch/$USER/EPA
+```
+
+- `[WARN] 전처리 미완 (누락: ...)` → **그냥 재실행하면 된다.** 4단계 모두 산출물이 있으면
+  건너뛰므로 완료된 작업은 반복하지 않는다.
+- `[FAIL] 전처리가 train과 val 사이에서 끊겼다` → **재실행 전에 지워야 한다** (§8-I).
+  `rm /home/sr5/SR_AISolution_ACU/database/EPA/dump/spokenwoz/processed_*.json`
+
+리샘플링 도중에 끊긴 경우는 안전하다 — 개수가 모자라면 다시 돌리고, 기존 파일은 덮어쓴다.
+
 *참고 — 스모크(40대화) 기준 단계별 세그먼트 수: preprocessed 1358 → vad 1358 → processed 2715 → filtered 2715 (train).
 `processed`에서 2배가 되는 것은 user/system 두 채널의 턴을 하나로 병합하기 때문이며 정상이다.*
 
@@ -314,6 +327,7 @@ GATE  EPA-M h=640:  MRA ... HEA ... ERC ...   => PASS
 | **F** | `libtorchcodec_*.so` 로드 실패 | torchaudio 2.9는 모든 I/O를 TorchCodec으로 보낸다 | `scripts/sitecustomize.py`를 venv의 site-packages에 복사 (soundfile로 대체). **TorchCodec이 정상이면 아무 것도 하지 않으므로 무해하다** |
 | **G** | HF 다운로드를 시도하다 멈춤 | `env.sh`를 source 하지 않음 | `source ./env.sh`. `HF_HUB_OFFLINE=1`이 없으면 DNS 차단 노드에서 timeout까지 매달린다 |
 | **H** | wandb가 네트워크를 침 | `use_wandb: false`여도 모듈은 무조건 import된다 | `env.sh`의 `WANDB_MODE=offline`, `WANDB_DISABLED=true` |
+| **I** | 전처리 재실행했는데 학습이 `FileNotFoundError: .../processed_val.json` 으로 죽음 | **전처리가 train과 val 사이에서 끊긴 상태.** 상류 `handle_and_add_turns`가 mode 루프 안에서 `continue`가 아니라 `return`을 쓴다 (`src/data/data_processing.py:29`) — `processed_train.json`이 있으면 val을 만들지 않고 함수를 빠져나간다 | **재실행 전에 지울 것.** `rm /home/sr5/SR_AISolution_ACU/database/EPA/dump/spokenwoz/processed_*.json` 후 `sbatch scripts/preprocess.sbatch`. `preflight.sh`가 이 상태를 따로 잡아 이 명령을 출력한다. 다른 단계에서 끊긴 것은 그냥 재실행하면 된다 |
 
 ---
 
