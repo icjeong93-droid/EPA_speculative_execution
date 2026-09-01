@@ -33,15 +33,17 @@ NGPU="${NGPU:-$(nvidia-smi --list-gpus 2>/dev/null | wc -l)}"
   echo "   \$VENV/bin/python scripts/make_configs.py --root $ROOT --num-workers 32"
   exit 1; }
 
-# Inference reads the test split. If it was never preprocessed, the loader will
-# silently start channel-splitting + resampling 1000 dialogues -- on the GPU node.
-if ! ls "$DUMP_DIR"/*/filtered_test_*.json >/dev/null 2>&1; then
-  echo "!! the test split has not been preprocessed."
-  echo "   Run this first (CPU job, no GPU):"
-  echo "     sbatch scripts/preprocess.sbatch test"
-  echo "   Otherwise inference spends hours resampling while holding a GPU."
+# Inference reads the test split. If it was never preprocessed -- or was only
+# partly preprocessed -- the loader silently starts channel-splitting + resampling
+# 1000 dialogues on the GPU node. Checking for filtered_test_*.json alone is not
+# enough: that file is written BEFORE resampling starts, so a job killed midway
+# leaves it behind. check_preprocessed.py applies handle_resampling's own rule.
+if ! "$PY" "$ROOT/scripts/check_preprocessed.py" --dump "$DUMP_DIR" --modes test; then
+  echo
+  echo "   Refusing to start: inference would spend hours resampling while holding a GPU."
   exit 1
 fi
+echo
 
 # discover trained runs; a run is ready when its best checkpoint exists
 mapfile -t ALL < <(cd "$CKPT_DIR" && for d in */; do
@@ -56,12 +58,56 @@ else
 fi
 [ ${#RUNS[@]} -gt 0 ] || { echo "!! no run with best_val_acc.pt under $CKPT_DIR"; exit 1; }
 
+# load_run reads the model config that setup_save_folder copied into the checkpoint
+# folder, and load_config ASSERTS that config's `data_config:` path still exists --
+# an absolute path recorded at training time. Regenerating or moving configs/ between
+# training and evaluation therefore kills the run on an assertion with no hint.
+for run in "${RUNS[@]}"; do
+  cfg=$(ls "$CKPT_DIR/$run"/*.yaml 2>/dev/null | head -1) || true
+  if [ -z "${cfg:-}" ]; then
+    echo "!! $run has no config yaml -- load_run cannot resolve it."
+    echo "   The run folder must keep the model config setup_save_folder copied there."
+    exit 1
+  fi
+  n=$(ls "$CKPT_DIR/$run"/*.yaml 2>/dev/null | wc -l)
+  if [ "$n" -ne 1 ]; then
+    echo "!! $run contains $n yaml files; load_config accepts exactly one."
+    exit 1
+  fi
+  dc=$(grep -m1 "^data_config:" "$cfg" | sed "s/^data_config:[[:space:]]*//; s/[[:space:]]*$//")
+  if [ -n "$dc" ] && [ ! -f "$dc" ]; then
+    echo "!! $run points at a data config that no longer exists:"
+    echo "     $dc"
+    echo "   It was recorded when the run was trained. Recreate it at that exact path"
+    echo "   (make_configs.py --root <the root used for training>), or edit"
+    echo "     $cfg"
+    exit 1
+  fi
+done
+
 mkdir -p "$LOG_DIR"
 echo "checkpoints : $CKPT_DIR"
 echo "infer cfg   : $INFER_CFG"
 echo "runs        : ${RUNS[*]}"
 echo "gpus        : $NGPU"
 echo
+
+wave_pid=(); wave_run=(); failed=()
+
+# `wait` with no arguments always returns 0, so a crashed inference used to be
+# invisible and report_table1.py would just print the runs that did finish.
+drain() {
+  [ "${#wave_pid[@]}" -eq 0 ] && return 0
+  local k rc
+  for k in "${!wave_pid[@]}"; do
+    rc=0; wait "${wave_pid[$k]}" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "  !! ${wave_run[$k]} FAILED (exit $rc) -- see $LOG_DIR/${wave_run[$k]}.log"
+      failed+=("${wave_run[$k]}")
+    fi
+  done
+  wave_pid=(); wave_run=()
+}
 
 i=0
 for run in "${RUNS[@]}"; do
@@ -70,12 +116,22 @@ for run in "${RUNS[@]}"; do
   echo "[gpu $gpu] $run -> $log"
   ( cd "$MODEL_DIR" && CUDA_VISIBLE_DEVICES="$gpu" \
       "$PY" run.py --config "$INFER_CFG" --infer "$run" >"$log" 2>&1 ) &
+  wave_pid+=("$!"); wave_run+=("$run")
   i=$(( i + 1 ))
-  if (( i % NGPU == 0 )); then echo "  -- wave full ($NGPU jobs), waiting --"; wait; fi
+  if (( i % NGPU == 0 )); then echo "  -- wave full ($NGPU jobs), waiting --"; drain; fi
 done
-wait
+drain
+
+if [ "${#failed[@]}" -gt 0 ]; then
+  echo
+  echo "!! ${#failed[@]} inference run(s) FAILED: ${failed[*]}"
+  echo "   The table below omits them -- it is NOT the full result."
+  echo "   Inspect: tail -50 $LOG_DIR/<run>.log"
+fi
 
 echo
 echo "== Table 1 =="
-"$PY" "$ROOT/scripts/report_table1.py" --root "$ROOT" --checkpoints "$CKPT_DIR" \
+"$PY" "$ROOT/scripts/report_table1.py" --checkpoints "$CKPT_DIR" \
       --csv "$ROOT/logs/eval/threshold_sweep.csv"
+
+[ "${#failed[@]}" -eq 0 ] || exit 1

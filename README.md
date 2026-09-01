@@ -39,9 +39,13 @@ python scripts/download_spokenwoz.py --root .                  # 12.5GB 압축 �
 python scripts/download_spokenwoz.py --root . --verify          # 4700/1000 wav 확인
 
 python scripts/build_offline_bundle.py --root . --out offline_bundle   # wheel+HF, 4.8GB
-bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming   # 번들만
-# 데이터셋은 공용 database 영역으로 따로 보낸다 (§4)
+bash scripts/transfer.sh user@hpc:/scratch/$USER/EPA_incoming \
+    --data-dest /home/sr5/SR_AISolution_ACU/database/EPA     # 번들 + 데이터셋
 ```
+
+`--data-dest` 가 SpokenWOZ를 **작업 디렉터리 밖 공용 database 영역**으로 보낸다 (§4).
+빼면 `<remote>/data` 로 가는데, scratch는 15GB 예산이고 데이터셋은 28GB다.
+번들만/데이터만 나눠 보내려면 `--bundle-only` / `--data-only`.
 
 **`download_spokenwoz.py`는 단독 실행 파일이다.** 이 repo의 나머지에 의존하지 않으므로
 파일 하나만 복사해 가도 된다. 중단되면 그냥 다시 실행하면 이어받는다.
@@ -154,9 +158,16 @@ cuda        True NVIDIA H100 ...
 arch list   [... 'sm_90' ...]   ← sm_90 필수
 silero      OK (bundled ...)
 mimi        OK (loaded from HF_HUB_CACHE ...)
+audio i/o   OK (torchaudio.load/save round-trip, TorchCodec native)
 ```
 
 하나라도 빠지면 진행하지 말고 §8을 볼 것.
+
+> **`audio i/o` 줄이 가장 중요하다.** torchaudio 2.9는 `load`/`save`를 전부 TorchCodec으로
+> 보내고 없으면 `ImportError`다 — 전처리의 모든 wav가 여기를 지난다. import만 되는지 보는
+> 검사로는 잡히지 않아서, 실제로 wav를 쓰고 다시 읽는다. 실패하면 스크립트가 soundfile
+> 폴백(`sitecustomize.py`)을 깔고 **새 프로세스에서 다시 검증한 뒤**, 그래도 안 되면 멈춘다.
+> `audio i/o   OK (soundfile shim active)` 로 나와도 정상이다 — §8-F.
 
 ---
 
@@ -215,28 +226,35 @@ sbatch scripts/preprocess.sbatch test     # test 분할 — 평가(§7.5)에 필
 **이 단계를 건너뛰고 학습을 걸지 말 것.** 전처리는 CPU 바운드로 1~2시간 걸리는데 `run.py` 안에서 실행되므로,
 바로 학습을 제출하면 **H100 4장이 그 시간 내내 리샘플링을 기다린다.**
 
-**검증**
+**검증** — 파일 존재 여부를 눈으로 세지 말 것. 판정은 한 곳에 있다.
 
 ```bash
-D=/home/sr5/SR_AISolution_ACU/database/EPA/dump
-ls $D/spokenwoz/*.json       # preprocessed / vad_processed / processed / filtered × {train,val}
-du -sh $D                    # ~110 GB
+$VENV/bin/python scripts/check_preprocessed.py \
+    --dump /home/sr5/SR_AISolution_ACU/database/EPA/dump --modes train val
 ```
 
-로그 끝에 `preprocessing complete.` 와 샘플 수가 찍힌다.
-
-**중간에 끊겼다면** — `preflight.sh`가 어느 단계에서 멈췄는지 짚어준다.
-
-```bash
-bash scripts/preflight.sh /scratch/$USER/EPA
+```
+mode   verdict  dialogues   resampled/expected  missing stages
+train  OK            4103          8206/8206    -
+val    OK             486           972/972     -
 ```
 
-- `[WARN] 전처리 미완 (누락: ...)` → **그냥 재실행하면 된다.** 4단계 모두 산출물이 있으면
-  건너뛰므로 완료된 작업은 반복하지 않는다.
-- `[FAIL] 전처리가 train과 val 사이에서 끊겼다` → **재실행 전에 지워야 한다** (§8-I).
-  `rm /home/sr5/SR_AISolution_ACU/database/EPA/dump/spokenwoz/processed_*.json`
+`preflight.sh`도 같은 스크립트를 부르므로 둘의 판정이 어긋나지 않는다.
+로그 끝에는 `preprocessing complete.` 와 샘플 수가 찍힌다.
 
-리샘플링 도중에 끊긴 경우는 안전하다 — 개수가 모자라면 다시 돌리고, 기존 파일은 덮어쓴다.
+> **왜 `ls`로 세면 안 되는가.** `filtered_<mode>_....json` 은 **리샘플링이 시작되기 전에**
+> 기록된다(`endpointing_dataset.__init__`: 필터링 → `get_audio_feature` → 리샘플링).
+> 리샘플링 도중에 죽으면 파일 이름만으로는 "완료"로 보이고, 다음 GPU 잡이 **H100 4장을 쥔 채
+> 리샘플링을 다시 시작한다** — 전처리를 CPU 잡으로 떼어낸 이유가 통째로 무의미해진다.
+> 위 스크립트는 상류 `handle_resampling` 과 같은 규칙(대화수 × 채널수)으로 센다.
+
+**중간에 끊겼다면** — `preflight.sh` 또는 위 스크립트가 어느 단계인지 짚어준다.
+
+| verdict | 뜻 | 대응 |
+|---|---|---|
+| `PARTIAL` + `resampled/expected` 가 모자람 | 리샘플링 중단 | **그냥 재실행.** 개수가 모자라면 다시 돌리고 기존 파일은 덮어쓴다 |
+| `PARTIAL`/`MISSING` + missing stages | 앞 단계 중단 | **그냥 재실행.** 산출물이 있는 단계는 건너뛴다 |
+| `전처리가 train과 val 사이에서 끊겼다` | processed_train만 있음 | **재실행 전에 지울 것** (§8-I) — 스크립트가 `rm` 명령을 출력한다 |
 
 *참고 — 스모크(40대화) 기준 단계별 세그먼트 수: preprocessed 1358 → vad 1358 → processed 2715 → filtered 2715 (train).
 `processed`에서 2배가 되는 것은 user/system 두 채널의 턴을 하나로 병합하기 때문이며 정상이다.*
@@ -252,6 +270,9 @@ sbatch scripts/train.sbatch table1    # fc640, fc1280, fcall — Table 1 최소 
 ```
 
 `fcall`이 EPA-M(전 horizon 한 모델)이다. GPU 1장당 1런씩 채우고 wave 단위로 대기한다.
+
+**전처리(§6)가 끝나지 않았으면 제출 자체를 거부한다** — 리샘플링 개수까지 세므로 §8-J 상태도
+걸린다. GPU를 48시간 잡아놓고 리샘플링부터 시작하는 것을 막는 장치다.
 
 > **`fig2`를 권장하는 이유:** GPU가 4장인데 `table1`은 3런이라 1장이 논다. 그리고
 > **`fc960`은 공개 체크포인트와 같은 horizon이라, 우리 학습 결과를 외부 기준과 대조할 수 있는 유일한 지점**이다.
@@ -276,9 +297,41 @@ Saving model at epoch N to .../best_val_acc.pt
 > **val 곡선이 에폭마다 튀는 것은 정상이다.** validation 창을 매 에폭 무작위로 다시 뽑기
 > 때문이다(상류 동작, 부록 A 참조). 다만 `save_best_from_val_acc`와 early stopping이 그 위에서
 > 도니, **early stopping이 너무 이르게(예: 10에폭 이전) 걸리면 부록 A의 val 시드 고정을 검토할 것.**
+>
+> `preflight.sh`가 런별로 `epochs / best_val / @epoch / val range`를 찍는다. **`@epoch`이 0인 채로
+> 여러 에폭이 지났으면** 조기 종료가 운 좋은 첫 에폭을 상대로 카운트다운 중이라는 뜻이다.
+
+> ⚠️ **`val_accuracy`가 높다고 좋은 모델이 아니다 — 부록 A-3.** 이건 가중치 없는 프레임 정확도라
+> **전부 0으로 예측하면 fc640에서 ~93.8%, fcall에서 ~86%가 나온다.** `best_val_acc.pt`가 그런
+> 모델일 수 있고, 그 경우 평가에서 `!! never fired at ANY threshold` 로만 드러난다.
+> **첫 런이 끝나는 즉시 그 런 하나만 평가해 발사 여부부터 확인할 것** — 4장을 몇 시간 더 태우기 전에:
+>
+> ```bash
+> sbatch scripts/preprocess.sbatch test     # 아직 안 했다면
+> bash scripts/evaluate.sh fc640            # 표에 0만 나오면 학습이 아니라 선택 지표 문제
+> ```
 
 
 **파라미터가 25.19M이 아니면 config가 잘못된 것이다.** 중단하고 §5를 다시 확인할 것.
+
+**검증(끝난 뒤)** — `launch_train.sh`가 마지막에 런별 요약을 찍는다.
+
+```
+== summary ==
+  fc640    done     epochs=23   checkpoint=ok
+  fc1280   done     epochs=31   checkpoint=ok
+  fcall    FAILED   epochs=3    checkpoint=ok      ← 체크포인트가 있어도 실패다
+```
+
+- **`FAILED`가 하나라도 있으면 스크립트가 non-zero로 끝난다. 평가로 넘어가지 말 것.**
+  죽은 런도 직전 에폭의 `best_val_acc.pt`를 남기기 때문에, `evaluate.sh`는 그걸 정상 런과
+  구별하지 못하고 **그럴듯한 Table 1 한 줄을 인쇄한다.** `logs/train/<run>.log` 를 먼저 볼 것.
+- `epochs`는 `train.json`의 기록 수다. 조기 종료는 마지막 기록 전에 `exit()`하므로 1 적게
+  나오는 것이 정상이고, **1~2로 끝났으면 완주가 아니라 사고다.**
+- 이미 `best_val_acc.pt`가 있는 런은 **건너뛴다**(`[skip]`으로 표시). 그래서 웨이브 하나가
+  깨졌을 때 그냥 다시 제출하면 나머지만 이어서 돈다. 처음부터 다시 학습하려면 `FORCE=1`.
+  (상류의 `overwrite_prev_run: true`는 폴더를 비우지 않아서, 그냥 재실행하면 더 좋은 에폭이
+  나올 때까지 **옛 체크포인트가 그대로 남는다.**)
 
 ---
 
@@ -316,7 +369,17 @@ GATE  EPA-M h=640:  MRA ... HEA ... ERC ...   => PASS
 - `fcall` 런이 EPA-M이다. 관문(§1) 판정은 이 런에서만 나온다.
 
 **test 분할 전처리를 건너뛰면 `evaluate.sh`가 실행을 거부한다** — 그대로 두면 H100을 잡은 채
-1000개 대화를 리샘플링하기 때문이다.
+1000개 대화를 리샘플링하기 때문이다. 판정은 §6과 같은 `check_preprocessed.py`가 하므로
+**리샘플링만 덜 끝난 상태도 거부된다**(파일 이름만 보면 완료로 보이는 상태).
+
+`evaluate.sh`는 시작 전에 런마다 두 가지를 더 확인한다.
+
+- 체크포인트 폴더에 yaml이 **정확히 하나** 있을 것 — `load_config`가 그렇게 단언한다.
+- 그 yaml의 `data_config:` 경로가 **아직 존재할 것.** 학습 시점의 절대 경로가 박혀 있어서,
+  그 사이에 `configs/`를 옮기거나 다른 `--root`로 다시 생성했다면 추론이 assertion으로 죽는다.
+  스크립트가 어떤 경로가 사라졌는지 먼저 알려준다.
+
+추론이 실패한 런이 있으면 표를 출력한 뒤 non-zero로 끝난다 — **표가 전부가 아니라는 뜻이다.**
 
 ---
 
@@ -329,7 +392,11 @@ GATE  EPA-M h=640:  MRA ... HEA ... ERC ...   => PASS
 | **C** | `TritonMissing` | moshi의 RoPE가 `torch.compile`을 쓴다 | 리눅스에는 triton이 번들에 있어 정상 동작해야 한다. 그래도 나면 `NO_TORCH_COMPILE=1` (성능만 손해) |
 | **D** | `AttributeError: Can't get local object 'mimi.<locals>.encode'` | DataLoader 워커가 spawn으로 뜨면 Mimi extractor(지역 클래스)를 pickle 못 한다. **리눅스는 fork라 정상적으로는 안 난다** | `EPA_NUM_WORKERS=0` |
 | **E** | `run_name`이 잘려 체크포인트 폴더 이름이 이상함 | `src/utils/common.py`가 `basename(data_yaml).rstrip(".yaml")`을 쓰는데 `rstrip`은 접미사가 아니라 **문자 집합**을 지운다 (`spokenwoz_only.yaml` → `spokenwoz_on`) | 데이터 config 이름을 `. y a m l` 이외 문자로 끝낼 것. 현재 `swoz_v1` |
-| **F** | `libtorchcodec_*.so` 로드 실패 | torchaudio 2.9는 모든 I/O를 TorchCodec으로 보낸다 | `scripts/sitecustomize.py`를 venv의 site-packages에 복사 (soundfile로 대체). **TorchCodec이 정상이면 아무 것도 하지 않으므로 무해하다** |
+| **F** | `libtorchcodec_*.so` 로드 실패 / `ModuleNotFoundError: torchcodec` / 전처리 첫 wav에서 사망 | **torchaudio 2.9는 `load`/`save`를 전부 TorchCodec으로 보내고, 없으면 `ImportError`다.** TorchCodec은 런타임에 FFmpeg 공유 라이브러리도 요구한다 | `setup_offline.sh`가 torchcodec을 설치하고 **실제 wav 왕복으로 검증**한 뒤, 실패하면 soundfile 폴백(`scripts/sitecustomize.py`)을 깔고 새 프로세스에서 재검증한다. 수동으로 하려면: `$VENV/bin/pip install --no-index --find-links bundle/wheels torchcodec==0.16.0`, 안 되면 `cp scripts/sitecustomize.py $($VENV/bin/python -c 'import site;print(site.getsitepackages()[0])')/`. **TorchCodec이 정상이면 shim은 아무 것도 하지 않으므로 무해하다** |
+| **J** | 전처리를 다시 돌렸는데 학습/추론이 또 리샘플링을 시작함 | `filtered_<mode>_....json` 은 **리샘플링 전에** 기록된다. 이름만 보는 검사는 이 상태를 "완료"로 읽는다 | `$VENV/bin/python scripts/check_preprocessed.py --dump <dump> --modes train val` — `resampled/expected` 를 상류 `handle_resampling` 과 같은 규칙으로 센다. 모자라면 그냥 재실행 |
+| **K** | 표에 이상한 숫자가 나오는데 로그는 정상으로 보임 | 죽은 학습 런이 직전 에폭의 `best_val_acc.pt`를 남겼고, 예전 `launch_train.sh`는 자식 종료코드를 무시했다(`wait`는 항상 0을 반환) | 이제 런별로 `wait`하고 `== summary ==` 에 `FAILED`/`epochs`를 찍으며 non-zero로 끝난다. `FAILED`가 있으면 평가하지 말 것 (§7) |
+| **M** | `bash preflight.sh` 가 `$'\r': command not found` / `syntax error` 를 쏟거나, `./setup_offline.sh` 가 `bad interpreter` | **CRLF 번들.** git의 `eol=lf` 는 *커밋되는* 내용만 다스리고, Windows 작업 트리는 `core.autocrlf=true` 로 CRLF다. 번들러는 작업 트리를 복사하므로 `#!/usr/bin/env bash\r` 이 그대로 실려 간다 | 번들을 **다시 빌드**할 것 — `build_offline_bundle.py` 가 이제 복사할 때 LF로 변환하고, 남아 있으면 `!! CRLF survived into the bundle` 로 실패시킨다. 급하면 HPC에서: `find bundle -name '*.sh' -o -name '*.sbatch' \| xargs sed -i 's/\r$//'` |
+| **L** | 추론이 `AssertionError: Data config file not found` 로 죽음 | 체크포인트 폴더의 yaml에 **학습 시점의 절대 경로**가 박혀 있다. 그 사이 `configs/`를 옮기거나 다른 `--root`로 재생성했다 | `evaluate.sh`가 시작 전에 잡아 어떤 경로인지 알려준다. 같은 경로에 다시 만들거나 그 yaml의 `data_config:` 를 고칠 것 |
 | **G** | HF 다운로드를 시도하다 멈춤 | `env.sh`를 source 하지 않음 | `source ./env.sh`. `HF_HUB_OFFLINE=1`이 없으면 DNS 차단 노드에서 timeout까지 매달린다 |
 | **H** | wandb가 네트워크를 침 | `use_wandb: false`여도 모듈은 무조건 import된다 | `env.sh`의 `WANDB_MODE=offline`, `WANDB_DISABLED=true` |
 | **I** | 전처리 재실행했는데 학습이 `FileNotFoundError: .../processed_val.json` 으로 죽음 | **전처리가 train과 val 사이에서 끊긴 상태.** 상류 `handle_and_add_turns`가 mode 루프 안에서 `continue`가 아니라 `return`을 쓴다 (`src/data/data_processing.py:29`) — `processed_train.json`이 있으면 val을 만들지 않고 함수를 빠져나간다 | **재실행 전에 지울 것.** `rm /home/sr5/SR_AISolution_ACU/database/EPA/dump/spokenwoz/processed_*.json` 후 `sbatch scripts/preprocess.sbatch`. `preflight.sh`가 이 상태를 따로 잡아 이 명령을 출력한다. 다른 단계에서 끊긴 것은 그냥 재실행하면 된다 |
@@ -392,7 +459,7 @@ sbatch scripts/evaluate.sbatch
 **배포된 구현 쪽을 따른다.** 재현 대상은 논문 프로즈가 아니라 저자가 실제로 돌린 코드이고,
 공개 체크포인트와 대조하려면 같은 설정이어야 한다. **단 결과 보고 시 이 표를 함께 낼 것**(§10).
 
-### 학습 구성에서 알아둘 것 2건 (상류 동작, 고치지 않음)
+### 학습 구성에서 알아둘 것 3건 (상류 동작, 고치지 않음)
 
 논문과 어긋나는 것은 아니지만 **결과 해석에 영향을 준다.** 둘 다 저자 코드 그대로이고
 배포된 h=960 체크포인트도 같은 조건에서 학습됐다.
@@ -418,6 +485,24 @@ train과 val이 같은 경로를 타며 `random.choice`에 시드가 없다(`man
 **에폭마다 다른 데이터로 잰 값** 위에서 동작한다. val 대화가 수백 개라 평균이 어느 정도
 상쇄하지만, 에폭 간 비교 가능성은 깨져 있다. 운 좋은 창이 best로 저장되거나 어려운 창이
 연달아 나와 조기 종료될 수 있다.
+
+**3. 체크포인트 선택 지표를 "전부 0 예측"이 이긴다.**
+`save_best_from_val_acc: True`가 보는 `val_accuracy`는 `fc_base_lstm.py`의 **가중치 없는
+프레임 정확도**다. 손실은 5:1로 가중(0.5/0.1)하지만 **선택은 가중하지 않는다.** 라벨이 크게
+음성 쪽으로 치우쳐 있어서:
+
+| 설정 | 40초 창의 양성 프레임 | 전부-0 예측기의 `val_accuracy` |
+|---|---|---|
+| fc640 | ~31 / 500 (6.2%) | **~93.8%** |
+| fc1280 | ~62 / 500 (12.4%) | ~87.6% |
+| fcall | ~70 / 500 (13.9%) | ~86.1% |
+
+*(스모크 32대화 7019초에서 user 턴 679개 = 0.097 turn/s 로 계산. 2초 미만 턴 마스킹으로
+양성이 더 줄므로 실제 상한은 이보다 높다.)*
+
+즉 한 번도 발사하지 않는 모델이 `best_val_acc.pt`로 저장될 수 있고, 그 사실은 **평가 단계의
+`!! never fired at ANY threshold` 경고로만 드러난다.** 그래서 §7에 "첫 런이 끝나면 그 런만
+먼저 평가하라"를 넣어 두었다.
 
 **판단: 지금은 고치지 않는다.** 재현 기준선(=배포 구현과 동일 조건)을 지키는 값이 더 크다.
 **val 곡선이 심하게 요동치거나 early stopping이 납득 안 되는 시점에 걸리면** 그때 아래 최소
@@ -490,6 +575,7 @@ EPA/                        작업 디렉터리 (데이터셋·dump는 여기 �
 | `setup_offline.sh` | 오프라인 설치 (번들 안에 있음) |
 | `make_configs.py` | 경로 교정 config 생성 + 누락된 fc640 + `infer.yaml` 생성 |
 | `preprocess_only.py` / `preprocess.sbatch` | 전처리만 (CPU 잡). `test` 인자로 평가용 분할 |
+| **`check_preprocessed.py`** | **전처리 완료 판정의 유일한 기준. 리샘플링 개수까지 센다 (§8-J). preflight·evaluate가 둘 다 이걸 부른다** |
 | `evaluate.sh` / `evaluate.sbatch` | **학습 후 추론 → MRA/HEA/PAR/ERC** |
 | `report_table1.py` | threshold 스윕을 논문 Table 1 한 줄로 환원 + 관문 판정 |
 | `launch_train.sh` / `train.sbatch` | GPU에 런 분배 |

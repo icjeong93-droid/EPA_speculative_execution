@@ -16,6 +16,10 @@ Usage (local):
 Usage (HPC):
   python scripts/make_configs.py --root /scratch/$USER/EPA --device cuda
 
+Every write pins newline="\n". These configs may be generated on a Windows build
+machine, shipped in the offline bundle, and read on Linux; each is also copied
+verbatim into its checkpoint folder, where load_run reads it back at eval time.
+
 NOTE on config naming: src/utils/common.py builds run_name with
 `basename(data_yaml).rstrip(".yaml")`. rstrip strips a CHARACTER SET, not a
 suffix, so a data-config name ending in any of . y a m l gets mangled
@@ -181,7 +185,7 @@ def main():
     for stem, datasets in DATA_CONFIGS.items():
         text = build_data_config(datasets, spokenwoz, switchboard, dump)
         text = text.replace("{num_workers}", str(args.num_workers))
-        (out / "data" / f"{stem}.yaml").write_text(text, encoding="utf-8")
+        (out / "data" / f"{stem}.yaml").write_text(text, encoding="utf-8", newline="\n")
         print(f"  data/{stem}.yaml")
 
     target_data_cfg = (out / "data" / f"{args.data_config}.yaml").as_posix()
@@ -196,7 +200,7 @@ def main():
         text = src.read_text(encoding="utf-8")
         text = re.sub(r"^data_config:.*$", f"data_config: {target_data_cfg}", text, flags=re.M)
         text = re.sub(r"^(\s*save_folder:).*$", rf"\1 {Path(ckpt).as_posix()}", text, flags=re.M)
-        (out / "forecasting" / "mimi" / src.name).write_text(text, encoding="utf-8")
+        (out / "forecasting" / "mimi" / src.name).write_text(text, encoding="utf-8", newline="\n")
         made.append(src.name)
 
     # ---- fc640: upstream is missing it, Table 1 headline needs it -----
@@ -205,12 +209,12 @@ def main():
     base = re.sub(r"^data_config:.*$", f"data_config: {target_data_cfg}", base, flags=re.M)
     base = re.sub(r"^(\s*save_folder:).*$", rf"\1 {Path(ckpt).as_posix()}", base, flags=re.M)
     name640 = "fc640_transformer_mimi_12.5hz_loss1-01_m3.yaml"
-    (out / "forecasting" / "mimi" / name640).write_text(base, encoding="utf-8")
+    (out / "forecasting" / "mimi" / name640).write_text(base, encoding="utf-8", newline="\n")
     made.append(name640 + "   <- CREATED (missing upstream)")
 
     # ---- infer config: upstream ships one with the authors' paths baked in ----
     infer_text = build_infer_config(DATA_CONFIGS[args.data_config], spokenwoz, switchboard, ckpt)
-    (out / "infer.yaml").write_text(infer_text, encoding="utf-8")
+    (out / "infer.yaml").write_text(infer_text, encoding="utf-8", newline="\n")
     print("  infer.yaml   <- evaluation (MRA/HEA/PAR/ERC)")
 
     for m in sorted(made):

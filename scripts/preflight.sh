@@ -8,6 +8,11 @@
 # then a REMEDY block for anything that failed. Exit 0 only if nothing failed.
 
 WORK="${1:-$PWD}"
+SELFDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# any python is enough for the stdlib-only helpers; prefer the venv when it exists
+ANYPY="$WORK/.venv/bin/python"
+[ -x "$ANYPY" ] || ANYPY="$(command -v python3 2>/dev/null)"
+[ -n "$ANYPY" ] || ANYPY="$(command -v python 2>/dev/null)"
 # on the HPC the bundle sits next to the workdir; on the build machine it is
 # offline_bundle/ inside it. try both so this script works in either place.
 BUNDLE="${BUNDLE:-}"
@@ -93,6 +98,14 @@ if [ -d "$BUNDLE/wheels" ]; then
   if [ "$NONLINUX" -eq 0 ]; then ok "전부 리눅스 wheel";
   else no "비-리눅스 wheel ${NONLINUX}개" "빌드 머신(Windows/mac)용 wheel이 섞였다. 이 노드에서는 설치되지 않고 오프라인 복구도 불가 — 사용자에게 번들 재빌드를 요청할 것: ls \$BUNDLE/wheels | grep -E win_amd64\|macosx"; fi
   [ "$TR" -ge 1 ] && ok "triton 있음" || warn "triton 없음" "NO_TORCH_COMPILE=1 로 우회 가능(성능만 손해)"
+  # torchaudio 2.9 does every load/save through TorchCodec. A bundle without this
+  # wheel installs cleanly and then dies on the first wav of preprocessing (§8-F).
+  TC=$(ls "$BUNDLE/wheels"/torchcodec-*.whl 2>/dev/null | wc -l)
+  SF=$(ls "$BUNDLE/wheels"/soundfile-*.whl 2>/dev/null | wc -l)
+  if [ "$TC" -ge 1 ]; then ok "torchcodec wheel 있음 (오디오 I/O)"
+  elif [ "$SF" -ge 1 ]; then warn "torchcodec wheel 없음 (soundfile 폴백만 있음)" "setup_offline.sh 가 sitecustomize.py shim 을 깔아 우회한다. §8-F"
+  else no "torchcodec·soundfile wheel 둘 다 없음" "torchaudio.load 가 동작하지 않는다 — 전처리 첫 wav에서 죽는다.
+     오프라인으로 복구 불가. 번들 재빌드를 사용자에게 요청할 것 (build_offline_bundle.py 가 이제 둘 다 담는다)."; fi
   [ "$CU" -ge 1 ] && ok "torch cu128 wheel 있음" || no "torch cu128 wheel 없음" "번들 재빌드 필요"
   [ "$BAD" -eq 0 ] && ok "CPU torch 중복 없음" \
     || warn "CPU torch wheel이 섞여 있음" "pip이 잘못 집을 수 있다. cu128 아닌 torch-*.whl 삭제 권장"
@@ -175,6 +188,35 @@ EOF
   fi
   "$PY" -c "import moshi, transformers, silero_vad, wandb" 2>/dev/null && ok "moshi/transformers/silero/wandb import" \
     || no "의존성 import 실패" "setup_offline.sh 를 다시 실행"
+
+  # Importing modules is not proof that audio works. torchaudio 2.9 sends every
+  # load/save through TorchCodec, which also needs FFmpeg shared libs at runtime.
+  # Every wav in preprocessing goes through here, so a real round-trip is the only
+  # honest check -- otherwise preflight says PASS and the 1-2 h CPU job dies on the
+  # first file.
+  AIO=$("$PY" - <<'EOF' 2>&1
+import os, tempfile
+try:
+    import torch, torchaudio
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, "probe.wav")
+        torchaudio.save(p, torch.zeros(8000), 8000)   # 1-D, as handle_channels does
+        b, sr = torchaudio.load(p, frame_offset=100, num_frames=4000)
+        assert sr == 8000 and b.shape[-1] == 4000, (sr, tuple(b.shape))
+    via = "soundfile shim" if getattr(torchaudio, "_EPA_SOUNDFILE_SHIM", False) else "torchcodec"
+    print("AUDIO_OK", via)
+except Exception as e:
+    print("AUDIO_FAIL", type(e).__name__, e)
+EOF
+)
+  case "$AIO" in
+    AUDIO_OK*) ok "오디오 I/O 왕복 정상 (${AIO#AUDIO_OK })" ;;
+    *) no "torchaudio.load/save 실패: $AIO" "★ 전처리의 모든 wav 읽기·쓰기가 여기를 지난다. torchaudio 2.9는 TorchCodec으로만 I/O를 한다.
+     1) torchcodec 설치 확인: \$VENV/bin/pip install --no-index --find-links $BUNDLE/wheels torchcodec==0.16.0
+     2) 그래도 안 되면(FFmpeg 미설치 등) soundfile 폴백을 넣을 것:
+        cp $WORK/scripts/sitecustomize.py \$(\$VENV/bin/python -c 'import site;print(site.getsitepackages()[0])')/
+     3) 둘 다 불가하면 번들 재빌드가 필요하므로 사용자에게 알릴 것." ;;
+  esac
 else
   skip "venv 없음 — 아직 설치 전 (README §3)"
 fi
@@ -201,32 +243,86 @@ elif [ -d "$WORK/configs/forecasting/mimi" ]; then no "configs/infer.yaml 없음
 else skip "infer.yaml 미생성 (README §5)"; fi
 
 SW="$DUMP/spokenwoz"
-PREP_MISSING=""
-for f in preprocessed_train preprocessed_val vad_processed_train vad_processed_val processed_train processed_val; do
-  [ -f "$SW/$f.json" ] || PREP_MISSING="$PREP_MISSING $f.json"
-done
-for m in train val; do
-  ls "$SW"/filtered_${m}_context_*.json >/dev/null 2>&1 || PREP_MISSING="$PREP_MISSING filtered_${m}"
-done
-
+# check_preprocessed.py is the single authority for "is this split really done".
+# A filename-only check is not enough: filtered_<mode>_....json is written BEFORE
+# resampling starts, so a job killed midway looks complete and the next GPU job
+# resamples while holding four H100s.
 if [ ! -d "$SW" ]; then
   skip "전처리 전 (README §6)"
-elif [ -z "$PREP_MISSING" ]; then
-  ok "전처리 완료 train/val ($(du -sh "$DUMP" 2>/dev/null | cut -f1))"
-elif [ -f "$SW/processed_train.json" ] && [ ! -f "$SW/processed_val.json" ]; then
-  no "전처리가 train과 val 사이에서 끊겼다" "★ 그냥 재실행하면 안 된다. 상류 handle_and_add_turns가 processed_train.json을 보면 val을 만들지 않고 return한다 (src/data/data_processing.py:29). 지우고 다시 돌릴 것:
-     rm $SW/processed_*.json
-     sbatch scripts/preprocess.sbatch"
+elif [ -z "$ANYPY" ]; then
+  warn "python이 없어 전처리 상태를 확인하지 못함" "python3 를 load 한 뒤 preflight 를 다시 실행할 것"
 else
-  warn "전처리 미완 (누락:$PREP_MISSING)" "sbatch scripts/preprocess.sbatch 재실행 (완료된 단계는 건너뛴다)"
+  PREP=$("$ANYPY" "$SELFDIR/check_preprocessed.py" --dump "$DUMP" --modes train val 2>&1); PREPRC=$?
+  echo "$PREP" | sed 's/^/       /'
+  if [ "$PREPRC" -eq 0 ]; then
+    ok "전처리 완료 train/val ($(du -sh "$DUMP" 2>/dev/null | cut -f1))"
+  else
+    no "전처리 미완 또는 중단" "위 check_preprocessed.py 출력의 대응 명령을 그대로 실행할 것.
+     리샘플링만 덜 끝난 상태는 파일 이름으로는 '완료'로 보이므로 이 검사를 건너뛰지 말 것."
+  fi
 fi
 
-[ -d "$WORK/checkpoints" ] && [ -n "$(find "$WORK/checkpoints" -name '*.pt' 2>/dev/null)" ] \
-  && ok "체크포인트 있음: $(find "$WORK/checkpoints" -name 'best_val_acc.pt' | wc -l)개" \
-  || skip "학습 전 (README §7)"
+# test split: only needed before evaluation, so not a hard failure here
+if [ -n "$ANYPY" ] && [ -d "$SW" ]; then
+  if "$ANYPY" "$SELFDIR/check_preprocessed.py" --dump "$DUMP" --modes test --quiet >/dev/null 2>&1; then
+    ok "test 분할 전처리 완료 (평가 준비됨)"
+  else
+    skip "test 분할 미전처리 — 평가 전에: sbatch scripts/preprocess.sbatch test (README §7.5)"
+  fi
+fi
 
-if ls "$DUMP"/*/filtered_test_*.json >/dev/null 2>&1; then ok "test 분할 전처리 완료 (평가 준비됨)";
-else skip "test 분할 미전처리 — 평가 전에: sbatch scripts/preprocess.sbatch test (README §7.5)"; fi
+if [ -d "$WORK/checkpoints" ] && [ -n "$(find "$WORK/checkpoints" -name 'best_val_acc.pt' 2>/dev/null)" ]; then
+  ok "체크포인트 $(find "$WORK/checkpoints" -name 'best_val_acc.pt' 2>/dev/null | wc -l)개"
+  if [ -n "$ANYPY" ]; then
+    # Surface the two training properties that decide whether a checkpoint is worth
+    # evaluating (README 부록 A): epochs actually completed, and how much the val
+    # metric moves between epochs. Both come free from train.json.
+    TRS=$("$ANYPY" - "$WORK/checkpoints" <<'EOF' 2>&1
+import glob, json, os, sys
+root = sys.argv[1]
+rows = []
+for tj in sorted(glob.glob(os.path.join(root, "*", "train.json"))):
+    run = os.path.basename(os.path.dirname(tj))
+    try:
+        with open(tj, encoding="utf-8") as fh:
+            r = json.load(fh)
+    except Exception:
+        continue
+    va = [e["val_accuracy"] for e in r if isinstance(e, dict) and "val_accuracy" in e]
+    if not va:
+        continue
+    best = max(va)
+    rows.append((run, len(r), best, va.index(best), min(va), max(va)))
+if not rows:
+    sys.exit(0)
+def short(name):
+    # the model-config stem at the END is the identifying part, so trim the head
+    return name if len(name) <= 44 else "..." + name[-41:]
+print("%-44s %6s %8s %7s %s" % ("run", "epochs", "best_val", "@epoch", "val range"))
+for run, n, best, bi, lo, hi in rows:
+    print("%-44s %6d %8.4f %7d  %.3f..%.3f" % (short(run), n, best, bi, lo, hi))
+sus = [r for r in rows if r[1] >= 3 and r[3] == 0]
+short = [r for r in rows if r[1] <= 2]
+if sus:
+    print()
+    print("best val accuracy is still epoch 0 for: " + ", ".join(r[0] for r in sus))
+    print("early stopping counts every later epoch as 'no improvement', so the run can")
+    print("end at patience=6 having saved epoch-0 weights. The val window is re-drawn")
+    print("at random every epoch (README appendix A), so this can be pure noise.")
+if short:
+    print()
+    print("only 1-2 epochs recorded for: " + ", ".join(r[0] for r in short))
+    print("that is a crashed run, not a finished one -- check logs/train/<run>.log")
+sys.exit(2 if (sus or short) else 0)
+EOF
+)
+    TRRC=$?
+    [ -n "$TRS" ] && echo "$TRS" | sed 's/^/       /'
+    [ "$TRRC" -eq 2 ] && warn "학습 진행 상태에 의심스러운 런이 있음" "위 표를 볼 것. 평가 전에 해당 런의 로그를 확인할 것 (README §7)"
+  fi
+else
+  skip "학습 전 (README §7)"
+fi
 
 NEVAL=$(ls "$WORK"/checkpoints/*/infer_results.pt 2>/dev/null | wc -l)
 if [ "$NEVAL" -gt 0 ]; then ok "평가 결과 ${NEVAL}개 — 표: scripts/report_table1.py --root $WORK";

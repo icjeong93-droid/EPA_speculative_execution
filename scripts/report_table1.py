@@ -17,6 +17,11 @@ Metric names in infer_results.pt -> paper (src/training/forecasting_trainer.py):
   accuracies_with_collar       -> HEA (frac) fired inside the horizon + collar
   ep_cutoff                    -> PAR (%)    turns with >=1 premature anticipation
   total_cutoff_proportions_mean-> ERC (frac) premature / max possible, per turn
+
+Precision caveat: infer_loop stores HEA as `.round(2)` of a FRACTION, so the metric
+only exists at 1 pp granularity -- the printed decimal is cosmetic. MRA is quantised
+to 80 ms (one frame at 12.5 Hz), which is genuine. Both are well inside the gate's
++-3 pp / +-100 ms tolerances, so this affects how the row should be read, not PASS/FAIL.
 """
 import argparse
 import csv
@@ -43,7 +48,7 @@ def variant_of(run_name: str) -> str:
     return "EPA-M" if re.search(r"__fcall[_.]", run_name + "_") else "EPA-S"
 
 
-def load_runs(root: Path, ckpt_dir: Path):
+def load_runs(ckpt_dir: Path):
     runs = []
     for f in sorted(ckpt_dir.glob("*/infer_results.pt")):
         m = torch.load(f, map_location="cpu", weights_only=False)
@@ -85,7 +90,7 @@ def rows_for(entry, target_erc, fixed_threshold):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True, help="EPA working root")
+    ap.add_argument("--root", default=".", help="EPA working root (only used to locate checkpoints)")
     ap.add_argument("--checkpoints", default=None, help="default <root>/checkpoints")
     ap.add_argument("--target-erc", type=float, default=None,
                     help="force one ERC operating point for every row. Default: each row uses its own paper ERC (33.8/33.9/33.7/33.2).")
@@ -96,7 +101,7 @@ def main():
 
     root = Path(args.root).resolve()
     ckpt_dir = Path(args.checkpoints) if args.checkpoints else root / "checkpoints"
-    runs = load_runs(root, ckpt_dir)
+    runs = load_runs(ckpt_dir)
     if not runs:
         raise SystemExit(
             f"no infer_results.pt under {ckpt_dir}/*/\n"
@@ -166,6 +171,10 @@ def main():
                         for i, k in zip((0, 1, 3), ("MRA", "HEA", "ERC"))))
         print("      => " + ("PASS" if ok else "OUT OF TOLERANCE") +
               f"  (tolerance MRA +-100ms, HEA +-3pp, ERC +-3pp)")
+    print("\nRESOLUTION: HEA is quantised to 1 pp upstream (infer_loop rounds the fraction")
+    print("      to 2 decimals), so a printed 66.0 could be anything in [65.5, 66.5) --")
+    print("      it can never read 66.3 like the paper's row. MRA's 80 ms steps are real")
+    print("      (one 12.5 Hz frame). Both sit inside the gate tolerances.")
     print("\nNOTE: the paper trained on SpokenWOZ + Switchboard; this run is SpokenWOZ only.")
     print("      Report that alongside any comparison -- a miss here is a condition")
     print("      difference, not necessarily a failed reproduction.")

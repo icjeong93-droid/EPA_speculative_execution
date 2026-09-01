@@ -41,7 +41,15 @@ PLATFORMS = ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64",
 PY_VERSION = "3.12"
 ABI = "cp312"
 
-TORCH = ["torch==2.9.1", "torchaudio==2.9.1"]
+# torchcodec is NOT optional. torchaudio 2.9 routes torchaudio.load/save through
+# it unconditionally (torchaudio/__init__.py:86,178) and raises ImportError when it
+# is missing -- which is every audio read in preprocessing. Leaving it out produced
+# a bundle that installed cleanly and then died on the first torchaudio.load, two
+# hours into a CPU job, after preflight had said PASS.
+# It is belt-and-braces with scripts/sitecustomize.py: torchcodec additionally needs
+# FFmpeg shared libraries at runtime, which an HPC image may not carry, and the shim
+# takes over when the import fails for that reason.
+TORCH = ["torch==2.9.1", "torchaudio==2.9.1", "torchcodec==0.16.0"]
 
 # torch's CUDA runtime deps are all guarded by `; platform_system == "Linux"`.
 # pip's --platform flag changes WHEEL TAG SELECTION ONLY -- environment markers are
@@ -76,6 +84,46 @@ HF_MODELS = {
 HF_MODELS_OPTIONAL = {
     "kyutai/stt-1b-en_fr": "infer.py's Mimi source (~GBs); only needed to run infer.py on the HPC",
 }
+
+
+# The bundle is built on Windows and unpacked on Linux. git's eol=lf only governs
+# what is COMMITTED -- with core.autocrlf=true the working tree holds CRLF, and this
+# script copies the working tree. A shell script copied verbatim then arrives on the
+# HPC as `#!/usr/bin/env bash\r`, and the first command in the runbook
+# (bash preflight.sh) dies with a syntax error on every line. Normalise on copy so
+# the bundle cannot depend on how the build machine happens to be checked out.
+TEXT_SUFFIXES = {".sh", ".sbatch", ".py", ".yaml", ".yml", ".md", ".txt",
+                 ".patch", ".ps1", ".cfg", ".toml", ".json", ".in"}
+TEXT_NAMES = {".gitignore", ".gitattributes"}
+
+
+def copy_lf(src, dst, *, follow_symlinks=True):
+    """shutil.copy2 that rewrites CRLF -> LF in text files."""
+    p = Path(src)
+    if p.suffix.lower() in TEXT_SUFFIXES or p.name in TEXT_NAMES:
+        data = p.read_bytes()
+        if b"\x00" not in data:                      # not actually binary
+            Path(dst).write_bytes(data.replace(b"\r\n", b"\n"))
+            shutil.copystat(src, dst)
+            return dst
+    return shutil.copy2(src, dst, follow_symlinks=follow_symlinks)
+
+
+def crlf_offenders(root_dir):
+    """Text files under root_dir that still carry CRLF. Should always be empty."""
+    out = []
+    for f in Path(root_dir).rglob("*"):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in TEXT_SUFFIXES and f.name not in TEXT_NAMES:
+            continue
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        if b"\x00" not in data and b"\r\n" in data:
+            out.append(f)
+    return out
 
 
 def run(cmd, **kw):
@@ -158,6 +206,20 @@ def main():
                 print(f"     {b}")
             failed.append("non-linux-wheels")
 
+        # Presence check for the wheels whose absence only shows up at runtime on a
+        # machine with no network. torchcodec/soundfile are the audio I/O path;
+        # without one of them nothing can read a wav.
+        REQUIRED = {
+            "torch (cu128)": "torch-*+cu128*.whl",
+            "torchaudio (cu128)": "torchaudio-*+cu128*.whl",
+            "torchcodec": "torchcodec-*.whl",
+            "soundfile": "soundfile-*.whl",
+        }
+        for label, pat in REQUIRED.items():
+            if not list(wd.glob(pat)):
+                print(f"!! required wheel missing from bundle: {label}  ({pat})")
+                failed.append(f"missing-wheel:{label}")
+
     if not args.skip_hf:
         print("\n[2/4] huggingface snapshots")
         from huggingface_hub import snapshot_download
@@ -182,10 +244,12 @@ def main():
     if repo_dst.exists():
         shutil.rmtree(repo_dst)
     shutil.copytree(src_repo, repo_dst,
-                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"),
+                    copy_function=copy_lf)
     # keep our modification visible as a patch rather than a silent edit
     diff = subprocess.run(["git", "-C", str(src_repo), "diff"], capture_output=True, text=True).stdout
-    (out / "repo_local_changes.patch").write_text(diff, encoding="utf-8")
+    # newline="\n": written on Windows, applied on Linux. A CRLF patch does not apply.
+    (out / "repo_local_changes.patch").write_text(diff, encoding="utf-8", newline="\n")
 
     epa = out / "epa"
     epa.mkdir(exist_ok=True)
@@ -193,10 +257,35 @@ def main():
         dst = epa / d
         if dst.exists():
             shutil.rmtree(dst)
-        shutil.copytree(root / d, dst, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(root / d, dst, ignore=shutil.ignore_patterns("__pycache__"),
+                        copy_function=copy_lf)
     for f in ("README.md", "requirements-freeze.txt"):
         if (root / f).exists():
-            shutil.copy2(root / f, epa / f)
+            copy_lf(root / f, epa / f)
+
+    # The installer has to sit at the BUNDLE ROOT: README section 3 and transfer.sh
+    # both say `cd bundle && bash setup_offline.sh`. It used to be copied only into
+    # epa/scripts/, so a freshly built bundle failed that command with
+    # "No such file or directory" -- the copy at the root was a manual leftover.
+    installer = root / "scripts" / "setup_offline.sh"
+    if not installer.is_file():
+        raise SystemExit(f"installer not found: {installer}")
+    copy_lf(installer, out / "setup_offline.sh")
+    os.chmod(out / "setup_offline.sh", 0o755)
+    print(f"  setup_offline.sh -> {out / 'setup_offline.sh'}")
+
+    # The bundle must be byte-clean for Linux before it leaves this machine --
+    # there is no way to fix a CRLF shell script on a host with no network.
+    offenders = crlf_offenders(epa) + crlf_offenders(repo_dst)
+    if (out / "setup_offline.sh").read_bytes().count(b"\r\n"):
+        offenders.append(out / "setup_offline.sh")
+    if offenders:
+        print("!! CRLF survived into the bundle (would break on Linux):")
+        for o in offenders[:20]:
+            print(f"     {o}")
+        failed.append("crlf-in-bundle")
+    else:
+        print("  line endings: LF throughout (checked epa/, repo/, setup_offline.sh)")
 
     print("\n[4/4] manifest")
 
@@ -233,7 +322,7 @@ def main():
     if failed:
         lines += ["", "!! FAILED (fetch these manually):"] + [f"  - {f}" for f in failed]
     text = "\n".join(lines)
-    (out / "MANIFEST.txt").write_text(text, encoding="utf-8")
+    (out / "MANIFEST.txt").write_text(text, encoding="utf-8", newline="\n")
     print("\n" + text)
 
 
