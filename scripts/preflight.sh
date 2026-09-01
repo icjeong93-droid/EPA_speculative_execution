@@ -58,11 +58,24 @@ else
   skip "nvidia-smi 없음 (로그인 노드일 수 있음 — 학습은 GPU 노드에서)"
 fi
 
-AVAIL=$(df -BG "$WORK" 2>/dev/null | awk 'NR==2{gsub("G","",$4); print $4}')
-if [ -n "$AVAIL" ]; then
-  [ "$AVAIL" -ge 200 ] && ok "디스크 ${AVAIL}G 여유 (>= 200G)" \
-    || no "디스크 ${AVAIL}G 여유 (200G 필요)" "원본 28G + dump ~130G + 번들 5G. scratch로 옮기거나 정리할 것."
+# dump can live on another filesystem (here: the shared database area), so read
+# it from the config rather than assuming <workdir>/dump.
+DUMP="${EPA_DUMP:-}"
+if [ -z "$DUMP" ] && [ -f "$WORK/configs/data/swoz_v1.yaml" ]; then
+  DUMP=$(grep -m1 "dump:" "$WORK/configs/data/swoz_v1.yaml" | sed "s/.*dump:[[:space:]]*//; s/[[:space:]]*$//")
 fi
+[ -n "$DUMP" ] || DUMP="$WORK/dump"
+
+check_space() {  # dir needed_G label
+  d="$1"; need="$2"; lbl="$3"
+  probe="$d"; while [ ! -d "$probe" ] && [ "$probe" != "/" ]; do probe=$(dirname "$probe"); done
+  a=$(df -BG "$probe" 2>/dev/null | awk 'NR==2{gsub("G","",$4); print $4}')
+  [ -n "$a" ] || return 0
+  if [ "$a" -ge "$need" ]; then ok "$lbl ${a}G 여유 (>= ${need}G) — $probe"
+  else no "$lbl ${a}G 여유 (${need}G 필요) — $probe" "공간 부족. dump를 옮기려면 make_configs.py --dump <경로> 로 config를 다시 생성할 것."; fi
+}
+check_space "$DUMP" 120 "dump(전처리)"
+check_space "$WORK" 15 "작업 디렉터리(번들+체크포인트)"
 echo
 
 # ---------------------------------------------------------------- bundle
@@ -112,8 +125,10 @@ D="${SPOKENWOZ:-}"
 if [ -z "$D" ] && [ -f "$WORK/configs/data/swoz_v1.yaml" ]; then
   D=$(grep -m1 "raw_path:" "$WORK/configs/data/swoz_v1.yaml" | sed "s/.*raw_path:[[:space:]]*//; s/[[:space:]]*$//")
 fi
-[ -n "$D" ] && [ -d "$D" ] || D="$WORK/data/SpokenWOZ"
-[ -d "$D" ] || D="$WORK/../data/SpokenWOZ"
+if [ -z "$D" ]; then
+  D="$WORK/data/SpokenWOZ"
+  [ -d "$D" ] || D="$WORK/../data/SpokenWOZ"
+fi
 echo "경로: $D"
 if [ -d "$D" ]; then
   NTR=$(ls "$D/audio_5700_train_dev"/*.wav 2>/dev/null | wc -l)
@@ -185,9 +200,9 @@ if [ -f "$WORK/configs/infer.yaml" ]; then ok "infer.yaml 있음 (평가용)";
 elif [ -d "$WORK/configs/forecasting/mimi" ]; then no "configs/infer.yaml 없음" "평가(MRA/HEA/PAR/ERC)를 돌릴 수 없다. make_configs.py 재실행 (README §5)";
 else skip "infer.yaml 미생성 (README §5)"; fi
 
-[ -d "$WORK/dump/spokenwoz" ] \
-  && { NJ=$(ls "$WORK/dump/spokenwoz"/*.json 2>/dev/null | wc -l)
-       [ "$NJ" -ge 8 ] && ok "전처리 완료 (json ${NJ}개, $(du -sh "$WORK/dump" 2>/dev/null | cut -f1))" \
+[ -d "$DUMP/spokenwoz" ] \
+  && { NJ=$(ls "$DUMP/spokenwoz"/*.json 2>/dev/null | wc -l)
+       [ "$NJ" -ge 8 ] && ok "전처리 완료 (json ${NJ}개, $(du -sh "$DUMP" 2>/dev/null | cut -f1))" \
          || warn "전처리 부분적 (json ${NJ}개)" "preprocess.sbatch 재실행"; } \
   || skip "전처리 전 (README §6)"
 
@@ -195,7 +210,7 @@ else skip "infer.yaml 미생성 (README §5)"; fi
   && ok "체크포인트 있음: $(find "$WORK/checkpoints" -name 'best_val_acc.pt' | wc -l)개" \
   || skip "학습 전 (README §7)"
 
-if ls "$WORK"/dump/*/filtered_test_*.json >/dev/null 2>&1; then ok "test 분할 전처리 완료 (평가 준비됨)";
+if ls "$DUMP"/*/filtered_test_*.json >/dev/null 2>&1; then ok "test 분할 전처리 완료 (평가 준비됨)";
 else skip "test 분할 미전처리 — 평가 전에: sbatch scripts/preprocess.sbatch test (README §7.5)"; fi
 
 NEVAL=$(ls "$WORK"/checkpoints/*/infer_results.pt 2>/dev/null | wc -l)

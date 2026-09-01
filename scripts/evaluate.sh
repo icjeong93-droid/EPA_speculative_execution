@@ -15,7 +15,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="$ROOT/EndpointAnticipation/anticipation-model"
 CKPT_DIR="${CKPT_DIR:-$ROOT/checkpoints}"
-DUMP_DIR="${DUMP_DIR:-$ROOT/dump}"
+# dump may sit on another filesystem; the generated data config is the authority
+DUMP_DIR="${DUMP_DIR:-}"
+if [ -z "$DUMP_DIR" ] && [ -f "$ROOT/configs/data/swoz_v1.yaml" ]; then
+  DUMP_DIR=$(grep -m1 "dump:" "$ROOT/configs/data/swoz_v1.yaml" | sed "s/.*dump:[[:space:]]*//; s/[[:space:]]*$//")
+fi
+[ -n "$DUMP_DIR" ] || DUMP_DIR="$ROOT/dump"
 INFER_CFG="${INFER_CFG:-$ROOT/configs/infer.yaml}"
 LOG_DIR="$ROOT/logs/eval"
 VENV="${VENV:-$ROOT/.venv}"

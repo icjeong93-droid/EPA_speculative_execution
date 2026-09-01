@@ -115,12 +115,13 @@ Windows 10+ 내장 OpenSSH의 `scp`/`ssh`만 사용하며, **보내기 전에 �
 python3.12 --version          # 없으면: module avail python → 3.12 계열 load
 ldd --version | head -1       # ★ glibc ≥ 2.28 이어야 함 (아래 참조)
 nvidia-smi                    # H100 4장
-df -h /scratch                # ≥ 200 GB 여유
+df -h /home/sr5/SR_AISolution_ACU/database/EPA         # 데이터+dump: >= 150 GB
+df -h /scratch                                    # 작업 디렉터리: >= 15 GB
 ls bundle/                            # 전송된 번들
 ls /home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ/   # 데이터셋
 ```
 
-**검증:** python 3.12.x / **glibc ≥ 2.28** / GPU 4장 / scratch ≥200GB /
+**검증:** python 3.12.x / **glibc ≥ 2.28** / GPU 4장 / 디스크(위 두 곳) /
 `bundle/wheels`·`bundle/hf_cache`·`/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ` 존재. 하나라도 없으면 **중단하고 사용자에게 알릴 것.**
 
 > ✅ **확인됨 — 이 HPC의 glibc는 2.34다.** 번들에서 가장 높은 태그가 `manylinux_2_28`이고
@@ -130,7 +131,9 @@ ls /home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ/   # 데이터셋
 > 번들을 `manylinux2014`(glibc 2.17) 태그로 다시 빌드해야 하므로 사용자에게 알릴 것.
 > 확인 명령: `ls bundle/wheels/torch-*.whl` 의 파일명에 찍힌 태그와 `ldd --version` 을 대조.
 
-디스크 내역: 원본 28GB + 전처리 dump ~130GB + 번들 ~6GB + 체크포인트 런당 ~0.3GB.
+디스크 내역 — **두 파일시스템에 나뉜다.**
+- `/home/sr5/SR_AISolution_ACU/database/EPA` : 원본 28GB + dump ~110GB = **~140GB**
+- 작업 디렉터리(`/scratch/$USER/EPA`) : 번들 ~6GB + 체크포인트 런당 ~0.3GB
 
 ---
 
@@ -189,7 +192,8 @@ ls $D/text_5700_train_dev/                 # data.json, valListFile.json
 
 ```bash
 $VENV/bin/python scripts/make_configs.py --root /scratch/$USER/EPA --num-workers 32 \
-    --spokenwoz /home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ
+    --spokenwoz /home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ \
+    --dump /home/sr5/SR_AISolution_ACU/database/EPA/dump
 ```
 
 **검증:** `configs/forecasting/mimi/` 에 fc320·fc640·fc960·fc1280·fc1600·fc1920·fc2240·fc2560·fcall 존재,
@@ -214,8 +218,9 @@ sbatch scripts/preprocess.sbatch test     # test 분할 — 평가(§7.5)에 필
 **검증**
 
 ```bash
-ls dump/spokenwoz/*.json     # preprocessed / vad_processed / processed / filtered × {train,val}
-du -sh dump                  # ~130 GB
+D=/home/sr5/SR_AISolution_ACU/database/EPA/dump
+ls $D/spokenwoz/*.json       # preprocessed / vad_processed / processed / filtered × {train,val}
+du -sh $D                    # ~110 GB
 ```
 
 로그 끝에 `preprocessing complete.` 와 샘플 수가 찍힌다.
@@ -407,10 +412,9 @@ SpokenWOZ가 필요한 것을 전부 갖고 있다 — `words[i]`에 `{Word, Beg
 ## 부록 D — 디렉터리
 
 ```
-EPA/                        작업 디렉터리 (데이터셋은 여기 없음 — §4)
+EPA/                        작업 디렉터리 (데이터셋·dump는 여기 없음 — §4)
 ├── EndpointAnticipation/   상류 클론 (수정 금지, patch 1건만 적용됨)
 ├── configs/                make_configs.py 생성물
-├── dump/                   전처리 산출물 (~110 GB) — 작업 FS 용량 확인할 것
 ├── checkpoints/            학습 출력
 ├── logs/
 ├── scripts/
@@ -418,7 +422,8 @@ EPA/                        작업 디렉터리 (데이터셋은 여기 없음 �
 └── requirements-freeze.txt
 
 /home/sr5/SR_AISolution_ACU/database/EPA/
-└── SpokenWOZ/             원본 28 GB (공용, 작업 디렉터리 밖)
+├── SpokenWOZ/             원본 28 GB
+└── dump/                  전처리 산출물 ~110 GB (재생성 가능)
 ```
 
 | 스크립트 | 용도 |
