@@ -39,7 +39,10 @@ from pathlib import Path
 PLATFORMS = ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64",
              "manylinux2014_x86_64", "manylinux_2_17_x86_64"]
 PY_VERSION = "3.12"
-ABI = "cp312"
+# hf-xet ships only cp38-abi3 wheels; offering just cp312 rejects them and the
+# bundle silently loses the dependency again. Pure-python (abi "none") wheels
+# are matched regardless of what is listed here.
+ABIS = ["cp312", "abi3"]
 
 # torchcodec is NOT optional. torchaudio 2.9 routes torchaudio.load/save through
 # it unconditionally (torchaudio/__init__.py:86,178) and raises ImportError when it
@@ -210,7 +213,9 @@ def run(cmd, **kw):
 def dl_wheels(py, dest, pkgs, index=None):
     dest.mkdir(parents=True, exist_ok=True)
     base = [py, "-m", "pip", "download", "--dest", str(dest),
-            "--python-version", PY_VERSION, "--implementation", "cp", "--abi", ABI]
+            "--python-version", PY_VERSION, "--implementation", "cp"]
+    for a in ABIS:
+        base += ["--abi", a]
     for p in PLATFORMS:
         base += ["--platform", p]
     if index:
