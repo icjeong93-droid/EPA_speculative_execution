@@ -25,6 +25,8 @@ What actually needs the network at runtime (verified by reading the code):
 """
 import argparse
 import os
+import re
+import zipfile
 import shutil
 import subprocess
 import sys
@@ -37,7 +39,8 @@ from pathlib import Path
 # which on a Windows build machine means win_amd64 wheels in a Linux bundle.
 # Keep every tag <= the HPC's glibc (checked: 2.34).
 PLATFORMS = ["manylinux_2_28_x86_64", "manylinux_2_27_x86_64",
-             "manylinux2014_x86_64", "manylinux_2_17_x86_64"]
+             "manylinux_2_24_x86_64", "manylinux2014_x86_64",
+             "manylinux_2_17_x86_64"]
 PY_VERSION = "3.12"
 # hf-xet ships only cp38-abi3 wheels; offering just cp312 rejects them and the
 # bundle silently loses the dependency again. Pure-python (abi "none") wheels
@@ -75,6 +78,10 @@ LINUX_ONLY = [
     # "Could not find a version that satisfies the requirement hf-xet".
     # Unpinned: the constraint (>=1.1.3,<2) comes from huggingface_hub itself.
     "hf-xet",
+    # moshi requires this under sys_platform == "linux" -- false on a Windows
+    # build host, so pip drops it and the HPC fails at install. Version range
+    # is moshi's own; leave it unpinned inside that range.
+    "bitsandbytes>=0.45,<0.50",
 ]
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 
@@ -210,6 +217,50 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=False, **kw)
 
 
+# A dependency guarded by one of these is invisible to pip on a Windows build
+# host: markers are evaluated against the machine running pip, not against
+# --platform. hf-xet and bitsandbytes both reached the HPC as an install-time
+# ERROR after 4.8 GB had already been moved. Catch the whole class here instead.
+LINUX_SYS = re.compile(r"""sys_platform\s*==\s*['"]linux['"]""")
+MACHINE_X86 = re.compile(r"""platform_machine\s*==\s*['"](x86_64|amd64|AMD64)['"]""")
+
+
+def canon(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def linux_only_gaps(wheel_dir):
+    """Requirements that apply on linux/x86_64 but have no wheel in the bundle."""
+    have = {canon(w.name.split("-")[0]) for w in wheel_dir.glob("*.whl")}
+    missing = {}
+    for w in sorted(wheel_dir.glob("*.whl")):
+        try:
+            with zipfile.ZipFile(w) as z:
+                meta = next((n for n in z.namelist()
+                             if n.endswith(".dist-info/METADATA")), None)
+                if meta is None:
+                    continue
+                text = z.read(meta).decode("utf-8", "replace")
+        except (zipfile.BadZipFile, OSError, KeyError):
+            continue
+        for line in text.splitlines():
+            if not line.startswith("Requires-Dist:"):
+                continue
+            req = line.split(":", 1)[1].strip()
+            if ";" not in req:
+                continue
+            name, marker = req.split(";", 1)
+            # extras are not installed unless requested, so they are not gaps
+            if "extra" in marker:
+                continue
+            if not (LINUX_SYS.search(marker) or MACHINE_X86.search(marker)):
+                continue
+            dist = canon(re.split(r"[<>=!~\[ (]", name.strip())[0])
+            if dist and dist not in have:
+                missing.setdefault(dist, w.name)
+    return missing
+
+
 def dl_wheels(py, dest, pkgs, index=None):
     dest.mkdir(parents=True, exist_ok=True)
     base = [py, "-m", "pip", "download", "--dest", str(dest),
@@ -303,11 +354,28 @@ def main():
             "torchcodec": "torchcodec-*.whl",
             "soundfile": "soundfile-*.whl",
             "hf-xet": "hf_xet-*.whl",
+            "bitsandbytes": "bitsandbytes-*.whl",
         }
         for label, pat in REQUIRED.items():
             if not list(wd.glob(pat)):
                 print(f"!! required wheel missing from bundle: {label}  ({pat})")
                 failed.append(f"missing-wheel:{label}")
+
+        # Generalisation of the list above: anything a downloaded wheel requires
+        # on linux/x86_64 must itself be in the bundle. Named packages can be
+        # forgotten; this cannot.
+        gaps = linux_only_gaps(wd)
+        if gaps:
+            print()
+            print("!! linux-only dependencies missing from the bundle "
+                  "(pip skipped them: this build host is not Linux)")
+            for dist, src in sorted(gaps.items()):
+                print(f"     {dist}   <- required by {src}")
+            print("   Add each to LINUX_ONLY and rebuild, or the HPC fails at")
+            print("   pip install with 'No matching distribution found'.")
+            failed.append("linux-marker-gaps")
+        else:
+            print("  linux-only deps: all present")
 
     if not args.skip_hf:
         print("\n[2/4] huggingface snapshots")
