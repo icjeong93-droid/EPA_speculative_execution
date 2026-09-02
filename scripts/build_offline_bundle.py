@@ -65,6 +65,13 @@ LINUX_ONLY = [
     "nvidia-nccl-cu12==2.27.5", "nvidia-nvshmem-cu12==3.3.20",
     "nvidia-nvtx-cu12==12.8.90", "nvidia-nvjitlink-cu12==12.8.93",
     "nvidia-cufile-cu12==1.13.1.3", "triton==3.5.1",
+    # Same trap, no CUDA involved: huggingface_hub 0.36 requires hf-xet under
+    # the marker platform_machine == "x86_64" or "amd64" or ... -- Windows
+    # reports "AMD64" and marker comparison is case-sensitive, so pip on a
+    # Windows build host skips it. The HPC then dies at pip install with
+    # "Could not find a version that satisfies the requirement hf-xet".
+    # Unpinned: the constraint (>=1.1.3,<2) comes from huggingface_hub itself.
+    "hf-xet",
 ]
 TORCH_INDEX = "https://download.pytorch.org/whl/cu128"
 
@@ -290,6 +297,7 @@ def main():
             "torchaudio (cu128)": "torchaudio-*+cu128*.whl",
             "torchcodec": "torchcodec-*.whl",
             "soundfile": "soundfile-*.whl",
+            "hf-xet": "hf_xet-*.whl",
         }
         for label, pat in REQUIRED.items():
             if not list(wd.glob(pat)):
