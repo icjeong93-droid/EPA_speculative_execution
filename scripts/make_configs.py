@@ -103,6 +103,25 @@ wandb:
 """
 
 
+def add_mlflow_block(text, mlruns):
+    """Append the mlflow: block that the patched WandbLogger reads.
+
+    Upstream has no experiment tracker that works here: wandb is hardwired to
+    mode="online" whenever enabled (src/utils/wandb_logger.py), which cannot run
+    on a node with no network. patches/epa-mlflow-logger.patch teaches that same
+    logger object to write to an MLflow FILE STORE, and this block turns it on.
+    """
+    if re.search(r"^mlflow:", text, flags=re.M):
+        return text
+    if not text.endswith("\n"):
+        text += "\n"
+    return text + (
+        "\nmlflow:\n"
+        "  use_mlflow: True\n"
+        f"  tracking_uri: {mlruns}\n"
+        '  experiment_name: "EPA reproduction (SpokenWOZ)"\n'
+    )
+
 def build_data_config(datasets, spokenwoz, switchboard, dump):
     blocks = []
     if "spokenwoz" in datasets:
@@ -177,6 +196,9 @@ def main():
     ckpt = args.checkpoints or (root / "checkpoints")
     out = (Path(args.out).resolve() if args.out else (root / "configs"))
     upstream = root / UPSTREAM
+    # MLflow file store. No server, no network -- the directory is copied out
+    # afterwards and opened with `mlflow ui`.
+    mlruns = (root / "logs" / "mlruns").as_uri()
 
     (out / "data").mkdir(parents=True, exist_ok=True)
     (out / "forecasting" / "mimi").mkdir(parents=True, exist_ok=True)
@@ -200,6 +222,7 @@ def main():
         text = src.read_text(encoding="utf-8")
         text = re.sub(r"^data_config:.*$", f"data_config: {target_data_cfg}", text, flags=re.M)
         text = re.sub(r"^(\s*save_folder:).*$", rf"\1 {Path(ckpt).as_posix()}", text, flags=re.M)
+        text = add_mlflow_block(text, mlruns)
         (out / "forecasting" / "mimi" / src.name).write_text(text, encoding="utf-8", newline="\n")
         made.append(src.name)
 
@@ -208,6 +231,7 @@ def main():
     base = re.sub(r"forecast_intervals_ms:\s*\[960\]", "forecast_intervals_ms: [640]", base)
     base = re.sub(r"^data_config:.*$", f"data_config: {target_data_cfg}", base, flags=re.M)
     base = re.sub(r"^(\s*save_folder:).*$", rf"\1 {Path(ckpt).as_posix()}", base, flags=re.M)
+    base = add_mlflow_block(base, mlruns)
     name640 = "fc640_transformer_mimi_12.5hz_loss1-01_m3.yaml"
     (out / "forecasting" / "mimi" / name640).write_text(base, encoding="utf-8", newline="\n")
     made.append(name640 + "   <- CREATED (missing upstream)")

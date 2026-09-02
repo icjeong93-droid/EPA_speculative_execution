@@ -42,7 +42,7 @@ echo "    moshi's resolver replace the cu128 build with a CPU one)"
 echo "==> remaining deps"
 "$PY" -m pip install --no-index --find-links "$BUNDLE/wheels" \
   numpy matplotlib PyYAML huggingface_hub tqdm moshi librosa scikit-learn \
-  easydict coloredlogs soundfile silero-vad transformers wandb
+  easydict coloredlogs soundfile silero-vad transformers wandb mlflow-skinny
 
 # --- offline environment --------------------------------------------------
 # HF_HUB_CACHE points at the snapshots we shipped; the OFFLINE flags stop
@@ -58,6 +58,10 @@ export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_HUB_DISABLE_TELEMETRY=1
 export WANDB_MODE=offline
+# MLflow >= 3.5 refuses the filesystem backend unless this is set. We want the
+# file store: five runs log at once and it gives each its own directory, where
+# a single sqlite file would serialise them and raise 'database is locked'.
+export MLFLOW_ALLOW_FILE_STORE=true
 export WANDB_DISABLED=true
 export TOKENIZERS_PARALLELISM=false
 # dataloader workers per run; 4 concurrent single-GPU runs x this = total procs

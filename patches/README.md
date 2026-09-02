@@ -12,7 +12,7 @@ git -C EndpointAnticipation checkout 531e1d7e70751e980b82088a3a358a2e75fa8a12
 git -C EndpointAnticipation apply ../patches/epa-num-workers.patch
 ```
 
-## 적용된 패치 — 1건뿐
+## 적용된 패치 — 2건
 
 ### `epa-num-workers.patch`
 
@@ -20,8 +20,32 @@ git -C EndpointAnticipation apply ../patches/epa-num-workers.patch
 `EPA_NUM_WORKERS` (기본 8)로 뺀다. Windows 는 워커 프로세스 spawn 비용이 커서
 로컬 스모크 실행 시 `EPA_NUM_WORKERS=0` 이 필요하다.
 
-**상류 수정은 이 1건으로 유지한다** (README §9-4). 재현 대상은 저자가 실제로 돌린
-코드이고, 배포된 h=960 체크포인트와 대조하려면 같은 코드여야 한다. 아래 항목들은
+### `epa-mlflow-logger.patch`
+
+`src/utils/wandb_logger.py` 의 `WandbLogger` 가 MLflow에도 기록하게 한다.
+트레이너는 손대지 않는다 — 이미 `log()` / `summary()` / `log_plots()` 인터페이스
+뒤로 추상화돼 있어서, 그 객체 하나만 바꾸면 호출부가 전부 따라온다.
+
+**왜 필요한가:** 상류의 유일한 실험 추적기는 wandb인데
+`mode="online" if cfg.wandb.use_wandb else "disabled"` 로 **모드가 하드코딩**되어
+있다. HPC는 네트워크가 없으므로 켜면 죽고, 끄면 아무것도 안 남는다. 그래서 wandb는
+비활성으로 두고 MLflow가 지표를 가져간다.
+
+- 백엔드는 **파일 스토어**(`file:///<workdir>/logs/mlruns`) — 서버도 네트워크도 불필요.
+  런 5개가 동시에 기록하는데 파일 스토어는 런마다 디렉터리가 갈리는 반면 sqlite 단일
+  파일은 직렬화되며 `database is locked` 를 낸다. MLflow ≥ 3.5 는 파일 스토어를
+  거부하므로 `MLFLOW_ALLOW_FILE_STORE=true` 를 코드와 `env.sh` 양쪽에서 세운다.
+- 지표 이름은 `train_total` → `train/total` 로 바꿔 다른 프로젝트와 맞춘다.
+  step은 `*_total` 이 찍힐 때만 증가하는 에폭 인덱스다.
+- **모든 MLflow 호출은 try/except 로 감싼다.** 8시간짜리 학습이 로거 때문에 죽으면
+  안 된다. mlflow가 없거나(import 실패) 3회 이상 실패하면 한 줄 찍고 조용히 꺼진다.
+- 켜는 것은 config의 `mlflow.use_mlflow` — `make_configs.py` 가 블록을 생성한다.
+  `EPA_MLFLOW_URI` 환경변수로 tracking_uri를 덮어쓸 수 있다.
+
+**수치에는 영향이 없다.** 데이터·모델·손실 경로를 건드리지 않고 로깅만 추가한다.
+
+**나머지는 그대로 둔다** (README §9-4). 재현 대상은 저자가 실제로 돌린 코드이고,
+배포된 h=960 체크포인트와 대조하려면 같은 코드여야 한다. 아래 항목들은
 전부 상류 그대로 두고, 대신 하네스 쪽에서 **감지·보고**한다.
 
 ## 검토했지만 패치하지 않은 상류 동작

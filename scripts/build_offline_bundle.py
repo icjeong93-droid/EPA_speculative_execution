@@ -98,6 +98,9 @@ PYPI = [
     "numpy", "matplotlib", "PyYAML", "huggingface_hub", "tqdm", "moshi",
     "librosa", "scikit-learn", "easydict", "coloredlogs", "soundfile",
     "silero-vad", "transformers", "wandb",
+    # experiment tracking: logs to a local file store, no server.
+    # skinny is enough to WRITE runs -- the UI runs on a laptop.
+    "mlflow-skinny",
     # bootstrap so the offline install can build any sdist that slips through
     "pip", "setuptools", "wheel",
 ]
@@ -355,6 +358,7 @@ def main():
             "soundfile": "soundfile-*.whl",
             "hf-xet": "hf_xet-*.whl",
             "bitsandbytes": "bitsandbytes-*.whl",
+            "mlflow-skinny": "mlflow_skinny-*.whl",
         }
         for label, pat in REQUIRED.items():
             if not list(wd.glob(pat)):
@@ -413,7 +417,9 @@ def main():
 
     epa = out / "epa"
     epa.mkdir(exist_ok=True)
-    for d in ("scripts", "configs"):
+    # patches/ travels too: it is the auditable record of what we changed in the
+    # upstream clone, and the HPC needs the files to re-apply one by hand.
+    for d in ("scripts", "configs", "patches"):
         dst = epa / d
         if dst.exists():
             shutil.rmtree(dst)

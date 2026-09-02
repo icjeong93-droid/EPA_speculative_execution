@@ -29,8 +29,9 @@ scp D:\VScode\EPA\STATUS.md ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspac
 
 ## 0. 한 줄 요약
 
-**설치까지 끝났다.** 남은 것은 config 생성 → 전처리 → 학습 → 평가이고, **전부 HPC에서 한다.**
-회사 로컬은 무언가 빠졌을 때만 다시 등장한다(§2).
+**설치까지 끝났다.** 남은 것은 config 생성 → (MLflow 연결) → 전처리 → 학습 → 평가.
+**계산은 전부 HPC**이고, 회사 로컬은 두 곳에서만 등장한다 — MLflow wheel을 받아 보낼 때(4-1b)와
+끝나고 결과를 가져와 UI로 볼 때(4-5).
 
 ---
 
@@ -96,7 +97,7 @@ scp <파일> ic.jeong@<HOST>:bundle/wheels/
 
 ---
 
-## 4. 남은 절차 — 4-1부터 4-4까지 전부 [HPC]
+## 4. 남은 절차
 
 ### 4-1. Config 생성  ← **지금 여기** · [HPC] · 즉시
 
@@ -127,6 +128,63 @@ bash scripts/preflight.sh $PWD
 `=== PASS ===` 가 나올 때까지 다음으로 넘어가지 않는다. 실패 항목마다 대응 명령을 직접 출력한다.
 `configs/forecasting/mimi/` 에 fc320·fc640·fc960·fc1280·fc1600·fc1920·fc2240·fc2560·fcall,
 `configs/infer.yaml`(평가용)이 있어야 한다.
+
+---
+
+### 4-1b. MLflow 연결 · 1회, 학습 전에 · [로컬] + [HPC]
+
+상류에는 쓸 수 있는 실험 추적기가 없다. 유일한 것이 wandb인데 모드가 `"online"` 으로
+하드코딩돼 있어 네트워크 없는 노드에서는 켤 수가 없다. 그래서 **MLflow를 붙였다** —
+`patches/epa-mlflow-logger.patch` 가 같은 로거 객체에 MLflow 기록을 추가한다.
+백엔드는 **파일 스토어**(`logs/mlruns`)라 서버도 네트워크도 필요 없다.
+
+**[로컬] ① mlflow-skinny wheel 받아서 보내기** (UI는 노트북에서 돌리므로 skinny로 충분)
+
+```powershell
+cd D:\VScode\EPA
+git pull
+mkdir mlflow_wheels
+python -m pip download mlflow-skinny --dest mlflow_wheels --only-binary=:all: `
+    --python-version 3.12 --implementation cp --abi cp312 --abi abi3 `
+    --platform manylinux_2_28_x86_64 --platform manylinux_2_27_x86_64 `
+    --platform manylinux_2_24_x86_64 --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64
+
+scp mlflow_wheels\*.whl                  ic.jeong@<HOST>:bundle/wheels/
+scp patches\epa-mlflow-logger.patch      ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/
+scp scripts\make_configs.py              ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/scripts/
+```
+
+**[HPC] ② 설치 · 패치 적용 · 환경변수**
+
+```bash
+cd /home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA && source ./env.sh
+
+$VENV/bin/python -m pip install --no-index --find-links ~/bundle/wheels mlflow-skinny
+$VENV/bin/python -c "import mlflow; print(mlflow.__version__)"
+
+cd EndpointAnticipation && patch -p1 < ../epa-mlflow-logger.patch && cd ..
+grep -c mlflow EndpointAnticipation/anticipation-model/src/utils/wandb_logger.py   # 0 이 아니어야 함
+
+echo 'export MLFLOW_ALLOW_FILE_STORE=true' >> ./env.sh && source ./env.sh
+```
+
+`MLFLOW_ALLOW_FILE_STORE` 는 MLflow ≥ 3.5 가 파일 스토어를 거부하기 때문에 필요하다.
+파일 스토어를 쓰는 이유는 **런 5개가 동시에 기록**하기 때문이다 — 파일 스토어는 런마다
+디렉터리가 갈리지만 sqlite 단일 파일은 직렬화되며 `database is locked` 를 낸다.
+
+**③ config 재생성** — 4-1을 이미 했더라도 `mlflow:` 블록을 넣기 위해 다시 돌린다.
+명령은 4-1과 같다. 생성된 config 끝에 이것이 붙어야 한다:
+
+```yaml
+mlflow:
+  use_mlflow: True
+  tracking_uri: file:///home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/logs/mlruns
+  experiment_name: "EPA reproduction (SpokenWOZ)"
+```
+
+> **로깅 실패는 학습을 죽이지 않는다.** MLflow 호출은 전부 try/except 안에 있고,
+> mlflow가 없거나 3회 이상 실패하면 한 줄 찍고 조용히 꺼진 채 학습은 계속된다.
+> 즉 이 단계를 건너뛰어도 4-3은 그대로 돌아간다 — 지표가 텍스트 로그에만 남을 뿐이다.
 
 ---
 
@@ -188,6 +246,24 @@ Saving model at epoch N to .../best_val_acc.pt
 재제출은 안전하다 — `best_val_acc.pt` 가 이미 있는 런은 건너뛰고 요약에 이름이 찍힌다
 (강제 재학습은 `FORCE=1`).
 
+**MLflow로 보기** (4-1b를 했다면). 런이 시작되면 바로 쌓인다:
+
+```bash
+ls logs/mlruns/                                   # 실험 디렉터리가 생겼는지
+find logs/mlruns -name "*.yaml" -path "*meta*" | wc -l    # 런 개수 = 제출한 런 수
+```
+
+기록되는 것:
+
+| 종류 | 이름 |
+|---|---|
+| 지표 (에폭마다) | `train/total`, `train/accuracy`, `val/total`, `val/accuracy` |
+| 파라미터 | config 전체를 평탄화한 값 + `num_params` |
+| 아티팩트 | val 예측 시각화 `pred_epochNNN.png` |
+
+런 이름은 config 이름(`fc640_...`)이라 UI에서 horizon별로 바로 갈린다.
+**UI는 HPC에서 띄우지 않는다** — 브라우저도 서버도 없다. §4-5에서 로컬로 가져와서 본다.
+
 ---
 
 ### 4-4. 평가 — Table 1 뽑기 · [HPC] · 1~2시간
@@ -208,9 +284,21 @@ sbatch scripts/evaluate.sbatch           # 학습된 런 전부 → 추론 → �
 표와 로그만 가져오면 된다. 체크포인트는 HPC에 두는 편이 낫다(런당 ~0.3GB).
 
 ```powershell
-scp -r ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/logs/eval .\results\
-scp    ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/logs/train/*.log .\results\
+$W = "ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA"
+scp -r "${W}/logs/eval"      .\results\
+scp    "${W}/logs/train/*.log" .\results\
+scp -r "${W}/logs/mlruns"    .\results\      # MLflow 런 (4-1b를 했다면)
 ```
+
+**MLflow UI는 여기서 띄운다** (HPC에는 브라우저가 없다):
+
+```powershell
+$env:MLFLOW_ALLOW_FILE_STORE = "true"
+mlflow ui --backend-store-uri "file:///$($PWD.Path -replace '\\','/')/results/mlruns"
+```
+
+학습이 도는 중에도 `logs/mlruns` 만 다시 받아오면 그 시점까지의 곡선을 볼 수 있다.
+UI를 띄우려면 로컬에 **full mlflow**가 필요하다(HPC에 깐 skinny는 기록 전용).
 
 ---
 

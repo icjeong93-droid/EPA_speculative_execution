@@ -1,0 +1,180 @@
+diff --git a/anticipation-model/src/utils/wandb_logger.py b/anticipation-model/src/utils/wandb_logger.py
+index ac38edc..c629e89 100755
+--- a/anticipation-model/src/utils/wandb_logger.py
++++ b/anticipation-model/src/utils/wandb_logger.py
+@@ -1,6 +1,40 @@
++import os
++import time
+ import wandb
+ import matplotlib.pyplot as plt
+ 
++# --- MLflow (patches/epa-mlflow-logger.patch) -----------------------------
++# Metrics go to MLflow, not wandb. Upstream hardwires wandb's mode to "online"
++# whenever use_wandb is true (see __init__ below), and the HPC has no network,
++# so wandb stays disabled and MLflow carries the run.
++#
++# MLflow writes to a local FILE STORE -- tracking_uri is file:///<workdir>/logs/
++# mlruns -- which needs no server and no network. The directory is copied out
++# afterwards and opened with `mlflow ui` on a machine that has a browser.
++#
++# EVERY mlflow call is guarded. A training run is 8+ hours; it must never die
++# because a logger failed. On repeated failures we print once and go quiet.
++try:
++    import mlflow
++    _MLFLOW_AVAILABLE = True
++except Exception:
++    _MLFLOW_AVAILABLE = False
++
++
++def _cfg_get(node, key, default=None):
++    """Read a key off an easydict/dict/namespace without raising."""
++    if node is None:
++        return default
++    try:
++        val = getattr(node, key)
++    except (AttributeError, KeyError, TypeError):
++        try:
++            val = node[key]
++        except Exception:
++            return default
++    return default if val is None else val
++
++
+ class WandbLogger():
+     def __init__(self, cfg):
+         self.cfg = cfg
+@@ -11,19 +45,132 @@ class WandbLogger():
+                                 config=cfg,
+                                 mode="online" if cfg.wandb.use_wandb else "disabled",
+                                 )
++        self._mlflow = False
++        self._fails = 0
++        self._epoch = {}
++        self._start_mlflow(cfg)
++
++    # --- mlflow ----------------------------------------------------------
++    def _start_mlflow(self, cfg):
++        if not (_MLFLOW_AVAILABLE and cfg is not None):
++            return
++        mlcfg = _cfg_get(cfg, "mlflow")
++        if not _cfg_get(mlcfg, "use_mlflow", False):
++            return
++        try:
++            uri = os.environ.get("EPA_MLFLOW_URI") or _cfg_get(mlcfg, "tracking_uri")
++            if uri:
++                if str(uri).startswith("file:") or "://" not in str(uri):
++                    # MLflow >= 3.5 refuses the filesystem backend unless this is
++                    # set. We do want it here: five runs log concurrently and the
++                    # file store gives each its own directory, where a single
++                    # sqlite file would serialise them and raise "database is
++                    # locked" under four H100s.
++                    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
++                mlflow.set_tracking_uri(uri)
++            name = _cfg_get(mlcfg, "experiment_name", "EPA")
++            # launch_train.sh starts one process per GPU at the same instant, so
++            # several of them can try to create the experiment directory at once.
++            for attempt in range(3):
++                try:
++                    mlflow.set_experiment(name)
++                    break
++                except Exception:
++                    if attempt == 2:
++                        raise
++                    time.sleep(1.0 + attempt)
++            mlflow.start_run(run_name=_cfg_get(cfg, "run_name"))
++            self._mlflow = True
++            self._log_params(cfg)
++        except Exception as e:
++            print(f"[mlflow] disabled: {type(e).__name__}: {e}", flush=True)
++            self._mlflow = False
++
++    def _log_params(self, cfg):
++        try:
++            params = self._flatten(cfg)
++            if params:
++                mlflow.log_params(params)
++        except Exception:
++            self._quiet()
++
++    def _flatten(self, node, prefix="", out=None, depth=0):
++        if out is None:
++            out = {}
++        if depth > 3 or len(out) > 90:      # mlflow caps params per run
++            return out
++        try:
++            items = list(node.items())
++        except Exception:
++            return out
++        for key, val in items:
++            full = f"{prefix}{key}"
++            if hasattr(val, "items"):
++                self._flatten(val, full + ".", out, depth + 1)
++            elif isinstance(val, (str, int, float, bool, list, tuple)) or val is None:
++                text = str(val)
++                if len(text) <= 250:
++                    out[full] = text
++        return out
++
++    def _quiet(self):
++        self._fails += 1
++        if self._fails == 3:
++            print("[mlflow] repeated logging failures; continuing without it",
++                  flush=True)
++            self._mlflow = False
++
+     def log(self, dct):
+         wandb.log(dct)
++        if not self._mlflow:
++            return
++        try:
++            metrics = {}
++            for key, val in dct.items():
++                if isinstance(val, bool) or not isinstance(val, (int, float)):
++                    continue
++                # train_total -> train/total, val_accuracy -> val/accuracy,
++                # matching the naming used in our other projects.
++                metrics[key.replace("_", "/", 1)] = float(val)
++            if not metrics:
++                return
++            mode = next(iter(metrics)).split("/")[0]
++            # One epoch per "<mode>_total" record; other calls reuse that index
++            # instead of advancing the x axis on their own.
++            if any(k.endswith("/total") for k in metrics):
++                self._epoch[mode] = self._epoch.get(mode, 0) + 1
++            mlflow.log_metrics(metrics, step=self._epoch.get(mode, 0))
++        except Exception:
++            self._quiet()
+ 
+     def log_plots(self, plt, name):
+         # raise NotImplementedError("log_plots not implemented")
+         wandb.log({name: wandb.Image(plt)})
++        if not self._mlflow:
++            return
++        try:
++            mlflow.log_figure(plt.gcf(),
++                              f"{name}_epoch{self._epoch.get('val', 0):03d}.png")
++        except Exception:
++            self._quiet()
+ 
+     def summary(self, dct):
+         for key in dct:
+             wandb.run.summary[key] = dct[key]
++        if not self._mlflow:
++            return
++        try:
++            mlflow.log_params({k: str(v) for k, v in dct.items()})
++        except Exception:
++            self._quiet()
+ 
+     def end_run(self):
+         self.run.finish()
++        if self._mlflow:
++            try:
++                mlflow.end_run()
++            except Exception:
++                pass
+ 
+     def log_audio(Self, aud, name, sample_rate=22050):
+-        wandb.log({name: wandb.Audio(aud,  sample_rate=sample_rate)})
+\ No newline at end of file
++        wandb.log({name: wandb.Audio(aud,  sample_rate=sample_rate)})
