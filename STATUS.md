@@ -4,12 +4,15 @@
 
 > 이 문서는 **이번 실행의 상태 스냅샷**이다. 절차의 근거와 배경은 `README.md`(런북)에,
 > 실패 모드 표는 README §8에 있다. 여기에는 **지금 어디까지 왔고 다음에 무엇을 치는지**만 적는다.
+>
+> 모든 명령 블록에 실행 위치를 **[HPC]** / **[로컬]** 로 표시했다.
 
 ---
 
 ## 0. 한 줄 요약
 
-**설치까지 끝났다.** 다음은 config 생성 → 전처리 → 학습 → 평가.
+**설치까지 끝났다.** 남은 것은 config 생성 → 전처리 → 학습 → 평가이고, **전부 HPC에서 한다.**
+회사 로컬은 무언가 빠졌을 때만 다시 등장한다(§2).
 
 ---
 
@@ -17,15 +20,16 @@
 
 | 무엇 | 경로 |
 |---|---|
-| 작업 디렉터리 | `/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA` |
-| 데이터셋 | `/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ` |
-| dump (전처리 산출물, ~110GB) | `/home/sr5/SR_AISolution_ACU/database/EPA/dump` |
-| 번들 (설치 후 삭제 가능) | `~/bundle` |
+| 작업 디렉터리 (HPC) | `/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA` |
+| 데이터셋 (HPC) | `/home/sr5/SR_AISolution_ACU/database/EPA/SpokenWOZ` |
+| dump — 전처리 산출물, ~110GB (HPC) | `/home/sr5/SR_AISolution_ACU/database/EPA/dump` |
+| 번들 — 설치 후 삭제 가능 (HPC) | `~/bundle` |
+| 로컬 작업 복사본 | `D:\VScode\EPA` |
 
 작업과 데이터가 다른 파일시스템에 나뉘어 있다. **이 분리는 의도된 것이다** — 데이터·dump는
 공용 database 영역, venv·체크포인트·로그는 개인 작업 공간.
 
-모든 명령 전에:
+**[HPC]** 모든 명령 전에:
 
 ```bash
 cd /home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA
@@ -34,19 +38,49 @@ source ./env.sh
 
 ---
 
-## 2. 완료된 것
+## 2. 어디서 무엇을 하는가
 
-- [x] 오프라인 번들 전송 (4.6GB) 및 설치
-- [x] `hf-xet`, `bitsandbytes` wheel 수동 보충 — 아래 §5 참조
-- [x] `hf_cache` 중첩(`hf_cache/hf_cache`) 해소
-- [x] `setup_offline.sh` 통과 — `torch 2.9.1+cu128` / `cuda True` / `sm_90` / `silero OK` / `mimi OK`
-- [x] 데이터 배치 확인 (train_dev 4700 wav, test 1000 wav)
+**HPC는 인터넷·DNS가 차단되어 있다.** 그래서 역할이 갈린다.
+
+| | 회사 로컬 (`D:\VScode\EPA`) | HPC |
+|---|---|---|
+| 성격 | 인터넷 되는 쪽. **바깥에서 뭔가 가져와야 할 때만** | 실제 계산이 도는 쪽. 남은 절차 전부 |
+| 하는 일 | 오프라인 번들 빌드, 빠진 wheel 받기, HF 캐시 확보, 파일 전송(`scp`), 결과 회수 | config 생성, 전처리, 학습, 평가 |
+| 명령 모양 | `.ps1`, `scp`, `dir`, `python scripts\...` | `bash`, `sbatch`, `ls`, `$VENV/bin/python` |
+
+**구분 규칙:** `.ps1`·`scp`·`dir`이면 로컬, `bash`·`sbatch`·`ls`면 HPC.
+
+### 로컬에서만 할 수 있는 일 (HPC에서 시도하지 말 것)
+
+HPC에서 다운로드를 시도하는 것은 README §9-1 위반이다. 아래는 전부 로컬 몫이다.
+
+```powershell
+# 번들 재빌드 (인터넷 필요)
+python scripts\build_offline_bundle.py --root . --out offline_bundle
+
+# 빠진 wheel 하나만 받기 — 태그는 PyPI에서 먼저 확인할 것 (§5 교훈)
+python -m pip download <패키지> --dest offline_bundle\wheels --no-deps --only-binary=:all: `
+    --python-version 3.12 --implementation <cp|py> --abi <cp312|abi3|none> --platform <manylinux 태그>
+
+# HPC로 보내기 (콜론 뒤를 비우면 원격 홈으로 간다)
+scp <파일> ic.jeong@<HOST>:bundle/wheels/
+```
 
 ---
 
-## 3. 남은 절차
+## 3. 완료된 것
 
-### 3-1. Config 생성  ← **지금 여기**
+- [x] **[로컬]** 오프라인 번들 빌드 및 전송 (4.6GB)
+- [x] **[로컬]** `hf-xet`, `bitsandbytes` wheel 수동 보충 — §5 참조
+- [x] **[HPC]** `hf_cache` 중첩(`hf_cache/hf_cache`) 해소
+- [x] **[HPC]** `setup_offline.sh` 통과 — `torch 2.9.1+cu128` / `cuda True` / `sm_90` / `silero OK` / `mimi OK`
+- [x] **[HPC]** 데이터 배치 확인 (train_dev 4700 wav, test 1000 wav)
+
+---
+
+## 4. 남은 절차 — 4-1부터 4-4까지 전부 [HPC]
+
+### 4-1. Config 생성  ← **지금 여기** · [HPC] · 즉시
 
 ```bash
 # dump가 database 영역에 ~110GB 생긴다. 공간과 쓰기 권한 먼저.
@@ -78,7 +112,7 @@ bash scripts/preflight.sh $PWD
 
 ---
 
-### 3-2. 전처리 — CPU 잡, 1~2시간
+### 4-2. 전처리 · [HPC] · CPU 잡, 1~2시간
 
 ```bash
 sbatch scripts/preprocess.sbatch          # train + val — 학습에 필요
@@ -91,7 +125,7 @@ sbatch scripts/preprocess.sbatch test     # test 분할 — 평가에 필요, �
 **검증**
 
 ```bash
-bash scripts/preflight.sh $PWD          # 전처리 완료 여부를 리샘플 파일 개수까지 세어 판정
+bash scripts/preflight.sh $PWD          # 리샘플 파일 개수까지 세어 완료를 판정한다
 du -sh /home/sr5/SR_AISolution_ACU/database/EPA/dump    # ~110GB
 ```
 
@@ -106,7 +140,7 @@ du -sh /home/sr5/SR_AISolution_ACU/database/EPA/dump    # ~110GB
 
 ---
 
-### 3-3. 학습 — GPU 잡, 8~12시간
+### 4-3. 학습 · [HPC] · GPU 잡, 8~12시간
 
 ```bash
 sbatch scripts/train.sbatch fig2      # fc640, fc1280, fcall, fc960, fc2560 (권장)
@@ -123,7 +157,7 @@ tail -f logs/train/fc640.log
 ```
 
 ```
-Number of trainable parameters: 25.19M      ← 다르면 config가 잘못된 것. 중단하고 3-1 재확인
+Number of trainable parameters: 25.19M      ← 다르면 config가 잘못된 것. 중단하고 4-1 재확인
 Mode: train, Loss: 0.xxxx, Acc: 0.xxxx
 val epoch: {'val_total': ..., 'val_accuracy': ...}
 Saving model at epoch N to .../best_val_acc.pt
@@ -138,7 +172,7 @@ Saving model at epoch N to .../best_val_acc.pt
 
 ---
 
-### 3-4. 평가 — Table 1 뽑기, 1~2시간
+### 4-4. 평가 — Table 1 뽑기 · [HPC] · 1~2시간
 
 ```bash
 sbatch scripts/evaluate.sbatch           # 학습된 런 전부 → 추론 → 표 출력
@@ -151,7 +185,18 @@ sbatch scripts/evaluate.sbatch           # 학습된 런 전부 → 추론 → �
 
 ---
 
-## 4. 결과를 보고할 때
+### 4-5. 결과 회수 · [로컬] · 마지막
+
+표와 로그만 가져오면 된다. 체크포인트는 HPC에 두는 편이 낫다(런당 ~0.3GB).
+
+```powershell
+scp -r ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/logs/eval .\results\
+scp    ic.jeong@<HOST>:/home/sr5/SR_AISolution_ACU/workspace/ic.jeong/EPA/logs/train/*.log .\results\
+```
+
+---
+
+## 5. 결과를 보고할 때
 
 관문: **SpokenWOZ EPA-M h=640에서 HEA 67.0% ± 3%p, MRA 640ms ± 100ms, ERC 33.8% ± 3%p.**
 
@@ -163,14 +208,15 @@ sbatch scripts/evaluate.sbatch           # 학습된 런 전부 → 추론 → �
 
 ---
 
-## 5. 이번 설치에서 걸렸던 것 (재발 시 대응)
+## 6. 이번 설치에서 걸렸던 것 (재발 시 대응)
 
-| 증상 | 원인 | 대응 |
-|---|---|---|
-| `No matching distribution found for hf-xet` / `bitsandbytes` | pip은 환경 마커를 **빌드 호스트** 기준으로 평가한다. Windows에서 번들을 만들면 `sys_platform == "linux"` / `platform_machine == "x86_64"` 로 걸린 의존성이 통째로 빠진다 | 해당 wheel만 받아 `bundle/wheels/` 에 넣고 `setup_offline.sh` 재실행. **빌드 스크립트에 검사가 추가되어 이제는 빌드 시점에 잡힌다** (`linux_only_gaps`) |
-| `OSError: We couldn't connect to https://huggingface.co ... couldn't find them in the cached files` | `hf_cache/hf_cache` 중첩. `scp -r hf_cache remote:bundle/` 인데 원격에 이미 `bundle/hf_cache` 가 있으면 그 **안으로** 들어간다 | `mv $H/hf_cache/* $H/ && rmdir $H/hf_cache` 를 번들과 대상 양쪽에 |
-| `mkdir: Permission denied` | 존재하지 않는 상위 디렉터리를 만들려 한 것 (경로 오타) | `pwd` 로 실제 경로를 확인. scp는 `host:` 뒤를 비우면 원격 홈으로 간다 |
-| `transfer.ps1` 이 매번 비밀번호를 물음 | 스크립트가 ssh를 30회 이상 호출한다. Windows OpenSSH는 접속 재사용(ControlMaster) 미지원 | 공개키를 `~/.ssh/authorized_keys` 에 등록. 홈이 그룹 쓰기 가능이면 sshd가 키를 무시하므로 `chmod go-w ~` 도 함께 |
+| 증상 | 어디서 | 원인 | 대응 |
+|---|---|---|---|
+| `No matching distribution found for hf-xet` / `bitsandbytes` | HPC 설치 중 | pip은 환경 마커를 **빌드 호스트** 기준으로 평가한다. Windows에서 번들을 만들면 `sys_platform == "linux"` / `platform_machine == "x86_64"` 로 걸린 의존성이 통째로 빠진다 | **[로컬]** 해당 wheel만 받아 **[HPC]** `bundle/wheels/` 에 넣고 `setup_offline.sh` 재실행. 빌드 스크립트에 검사가 추가되어 이제는 빌드 시점에 잡힌다(`linux_only_gaps`) |
+| `OSError: We couldn't connect to https://huggingface.co ... couldn't find them in the cached files` | HPC 검증 중 | `hf_cache/hf_cache` 중첩. `scp -r hf_cache remote:bundle/` 인데 원격에 이미 `bundle/hf_cache` 가 있으면 그 **안으로** 들어간다 | **[HPC]** `mv $H/hf_cache/* $H/ && rmdir $H/hf_cache` 를 번들과 대상 양쪽에 |
+| `mkdir: Permission denied` | 로컬에서 전송 시 | 존재하지 않는 상위 디렉터리를 만들려 한 것 (경로 오타) | **[HPC]** `pwd` 로 실제 경로 확인. scp는 `host:` 뒤를 비우면 원격 홈으로 간다 |
+| `transfer.ps1` 이 매번 비밀번호를 물음 | 로컬 | 스크립트가 ssh를 30회 이상 호출한다. Windows OpenSSH는 접속 재사용(ControlMaster) 미지원 | **[로컬]** 공개키를 `~/.ssh/authorized_keys` 에 등록. 홈이 그룹 쓰기 가능이면 sshd가 키를 무시하므로 **[HPC]** `chmod go-w ~` 도 함께 |
+| 파일이 탐색기에는 보이는데 `find` 는 없다고 함 | — | 로컬 셸과 HPC 셸을 혼동했거나, 변수(`$T` 등)가 그 셸에 없어 경로가 `/hf_cache/...` 로 평가된 것 | `hostname` 으로 어느 기계인지 먼저 확인. 변수 대신 전체 경로를 쓸 것 |
 
 **교훈 하나** — wheel을 수동으로 받을 때는 **플랫폼·ABI 태그를 PyPI에서 먼저 확인**할 것.
 번들의 다른 wheel과 같은 태그일 것이라 짐작하면 틀린다. 실제로 `hf-xet` 은 `cp38-abi3` +
@@ -178,7 +224,7 @@ sbatch scripts/evaluate.sbatch           # 학습된 런 전부 → 추론 → �
 
 ---
 
-## 6. 참고
+## 7. 참고
 
 - 절차의 근거·배경: `README.md`
 - 실패 모드 표: `README.md` §8
